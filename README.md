@@ -52,15 +52,12 @@
 
 ```mermaid
 flowchart LR
-    subgraph Record["记录阶段 · add_frame"]
         direction TB
         AF["add_frame(key, value)"]
         IX["MasterIndex<br/>record_frame(ts, task)"]
         PF["ParquetFeature ×3<br/>buffer.append(ts, data)"]
         VF["VideoFeature<br/>保存 PNG + 时间戳列表"]
-    end
 
-    subgraph Save["落盘 · save_episode()"]
         direction TB
         MI[("master_index.parquet<br/>timestamp | task | frame_index")]
         P1[("imu.parquet<br/>1000Hz × 6d")]
@@ -68,7 +65,6 @@ flowchart LR
         P3[("state.parquet<br/>30Hz × 7d")]
         C1[("head_rgb.parquet<br/>timestamps only")]
         V1[("head_rgb.mp4<br/>30fps video")]
-    end
 
     AF -->|"key = task"| IX
     AF -->|"key = sensor<br/>imu / eeg / state"| PF
