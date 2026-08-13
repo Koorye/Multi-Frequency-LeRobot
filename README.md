@@ -39,12 +39,10 @@
 
 | 传感器 | 典型频率 | 维度 | 示例 |
 |--------|---------|------|------|
-| 相机 RGB | 30 Hz | 480×640×3 | head_rgb, wrist_cam |
-| IMU | 1000 Hz | 6 (accel×3 + gyro×3) | 加速度计 + 陀螺仪 |
-| EEG | 256 Hz | 8-64 通道 | 脑电信号 |
-| EMG | 100 Hz | 4 通道 | 肌电信号 |
-| 关节状态 | 30 Hz | 7-14 DoF | 末端位姿 + 关节角 |
-| 温度 | 10 Hz | 1 | 电机温度 |
+| 相机 RGB | 30 / 60 Hz | 480×640×3 | 头部相机 + 腕部相机 |
+| IMU | 50-1000 Hz | 6 (accel×3 + gyro×3) | 加速度计 + 陀螺仪 |
+| EEG | 256 / 512 / 1000 Hz | 8-256 通道 | 脑电信号 |
+| EMG | 20-500 Hz | 4-16 通道 | 肌电信号 |
 
 原生 LeRobotDataset 把所有数据压入一个合并 parquet，低频率传感器需要上采样、高频率传感器被截断或平均——丢失了原始时间精度。
 
@@ -74,11 +72,13 @@ flowchart LR
         TS -->|decode| V1
     end
 
-    style MI fill:#333,stroke:#4fc3f7
-    style P1 fill:#333,stroke:#ff9800
-    style P2 fill:#333,stroke:#4caf50
-    style P3 fill:#333,stroke:#e91e63
-    style V1 fill:#333,stroke:#9c27b0
+    style MI fill:#e1f5fe,stroke:#4fc3f7,color:#000
+    style P1 fill:#fff3e0,stroke:#ff9800,color:#000
+    style P2 fill:#e8f5e9,stroke:#4caf50,color:#000
+    style P3 fill:#fce4ec,stroke:#e91e63,color:#000
+    style V1 fill:#f3e5f5,stroke:#9c27b0,color:#000
+    style AF fill:#fafafa,stroke:#9e9e9e,color:#000
+    style TS fill:#fafafa,stroke:#9e9e9e,color:#000
 ```
 
 查询 `ds[10]`（t=0.333s）时：
@@ -224,12 +224,12 @@ graph TB
     MI -.- F3
     C1 -.- V1
 
-    style MI fill:#1a237e,stroke:#4fc3f7,stroke-width:2px
-    style F1 fill:#1b5e20,stroke:#66bb6a
-    style F2 fill:#1b5e20,stroke:#66bb6a
-    style F3 fill:#1b5e20,stroke:#66bb6a
-    style C1 fill:#4a148c,stroke:#ce93d8
-    style V1 fill:#4a148c,stroke:#ce93d8
+    style MI fill:#e8eaf6,stroke:#4fc3f7,stroke-width:2px,color:#000
+    style F1 fill:#e8f5e9,stroke:#66bb6a,color:#000
+    style F2 fill:#e8f5e9,stroke:#66bb6a,color:#000
+    style F3 fill:#e8f5e9,stroke:#66bb6a,color:#000
+    style C1 fill:#f3e5f5,stroke:#ce93d8,color:#000
+    style V1 fill:#f3e5f5,stroke:#ce93d8,color:#000
 ```
 
 每个非视频 feature 一个 parquet，列格式统一：
@@ -467,11 +467,18 @@ flowchart TB
     MD --> META
     CK --> META
 
-    style DS fill:#1a237e,stroke:#4fc3f7,stroke-width:2px
-    style PF fill:#1b5e20,stroke:#66bb6a
-    style VF fill:#4a148c,stroke:#ce93d8
-    style IX fill:#b71c1c,stroke:#ef9a9a
-    style CK fill:#e65100,stroke:#ffcc80
+    style DS fill:#e8eaf6,stroke:#4fc3f7,stroke-width:2px,color:#000
+    style PF fill:#e8f5e9,stroke:#66bb6a,color:#000
+    style VF fill:#f3e5f5,stroke:#ce93d8,color:#000
+    style IX fill:#ffebee,stroke:#ef9a9a,color:#000
+    style CK fill:#fff3e0,stroke:#ffcc80,color:#000
+    style AF fill:#fafafa,stroke:#9e9e9e,color:#000
+    style GI fill:#fafafa,stroke:#9e9e9e,color:#000
+    style SE fill:#fafafa,stroke:#9e9e9e,color:#000
+    style MD fill:#fafafa,stroke:#9e9e9e,color:#000
+    style PQ fill:#fafafa,stroke:#9e9e9e,color:#000
+    style MP4 fill:#fafafa,stroke:#9e9e9e,color:#000
+    style META fill:#fafafa,stroke:#9e9e9e,color:#000
 ```
 
 **文件组织：**
