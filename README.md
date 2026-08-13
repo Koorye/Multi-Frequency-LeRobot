@@ -48,50 +48,85 @@
 
 **mf_lerobot 的解决方案**：每个传感器独立存储为时间索引的 parquet 文件。读取时通过 `window` 参数定义"如何围绕查询时间戳聚合数据"——无需预先重采样。
 
+**写入** — `add_frame` 按 key 分流到对应 feature 缓冲，`save_episode()` 时各自落盘：
+
 ```mermaid
 flowchart LR
-    subgraph Storage["存储层 (per-episode)"]
+    subgraph Record["记录阶段 · add_frame"]
         direction TB
-        MI["master_index.parquet<br/>timestamp, task, frame_index"]
-        P1["imu.parquet<br/>1000Hz × 6d"]
-        P2["eeg.parquet<br/>256Hz × 8d"]
-        P3["state.parquet<br/>30Hz × 7d"]
-        C1["head_rgb.parquet<br/>30Hz · timestamps only"]
-        V1["head_rgb.mp4<br/>30fps video"]
+        AF["add_frame(key, value)"]
+        IX["MasterIndex<br/>record_frame(ts, task)"]
+        PF["ParquetFeature ×3<br/>buffer.append(ts, data)"]
+        VF["VideoFeature<br/>保存 PNG + 时间戳列表"]
     end
 
-    subgraph Write["写入"]
-        AF["add_frame(key, value)"] -->|task| MI
-        AF -->|sensor| P1 & P2 & P3
-        AF -->|video| C1 & V1
+    subgraph Save["落盘 · save_episode()"]
+        direction TB
+        MI[("master_index.parquet<br/>timestamp | task | frame_index")]
+        P1[("imu.parquet<br/>1000Hz × 6d")]
+        P2[("eeg.parquet<br/>256Hz × 8d")]
+        P3[("state.parquet<br/>30Hz × 7d")]
+        C1[("head_rgb.parquet<br/>timestamps only")]
+        V1[("head_rgb.mp4<br/>30fps video")]
     end
 
-    subgraph Read["读取 ds[10]"]
-        IDX["ds[10]"] -->|"查第 10 帧"| MI
-        MI --> TS["t = 0.333s"]
-        TS -->|"nearest → 最近 1 行"| P3
-        TS -->|"window=(-0.033, 0] → 33 行"| P1
-        TS -->|"window=(-0.033, 0] → 8 行"| P2
-        TS -->|"nearest → frame_index"| C1
-        C1 -->|"decode(frame_index)"| V1
-    end
+    AF -->|"key = task"| IX
+    AF -->|"key = sensor<br/>imu / eeg / state"| PF
+    AF -->|"key = video"| VF
+    IX --> MI
+    PF --> P1
+    PF --> P2
+    PF --> P3
+    VF --> C1
+    VF --> V1
 
+    style AF fill:#fafafa,stroke:#9e9e9e,color:#000
+    style IX fill:#e1f5fe,stroke:#4fc3f7,color:#000
+    style PF fill:#fafafa,stroke:#9e9e9e,color:#000
+    style VF fill:#f3e5f5,stroke:#9c27b0,color:#000
     style MI fill:#e1f5fe,stroke:#4fc3f7,color:#000
     style P1 fill:#fff3e0,stroke:#ff9800,color:#000
     style P2 fill:#e8f5e9,stroke:#4caf50,color:#000
     style P3 fill:#fce4ec,stroke:#e91e63,color:#000
     style C1 fill:#f3e5f5,stroke:#9c27b0,color:#000
     style V1 fill:#f3e5f5,stroke:#9c27b0,color:#000
-    style AF fill:#fafafa,stroke:#9e9e9e,color:#000
-    style IDX fill:#fafafa,stroke:#9e9e9e,color:#000
-    style TS fill:#fafafa,stroke:#9e9e9e,color:#000
 ```
 
-查询 `ds[10]` 时：先查 `master_index` 得到第 10 帧的时间戳 t=0.333s，再按时间戳查询各 feature：
+**读取** — 先查 `master_index` 得到主时钟时间戳，再按时间戳查询各 feature：
+
+```mermaid
+flowchart LR
+    IDX["ds[10]"] -->|"① 查第 10 帧"| MI[("master_index.parquet<br/>timestamp | task | frame_index")]
+    MI -->|"② 取出时间戳"| TS["t = 0.333s"]
+    TS -->|"③ nearest<br/>找时间最近的行"| P3[("state.parquet<br/>30Hz × 7d")]
+    TS -->|"③ window=(-0.033, 0]<br/>区间内全部行"| P1[("imu.parquet<br/>1000Hz × 6d")]
+    TS -->|"③ window=(-0.033, 0]<br/>区间内全部行"| P2[("eeg.parquet<br/>256Hz × 8d")]
+    TS -->|"③ nearest<br/>找时间最近的行"| C1[("head_rgb.parquet<br/>timestamps only")]
+    C1 -->|"④ 得到 frame_index"| V1[("head_rgb.mp4<br/>30fps video")]
+    P3 -->|"1 行"| RS["state → [7]"]
+    P1 -->|"33 行"| RI["imu → [33, 6]"]
+    P2 -->|"8 行"| RE["eeg → [8, 8]"]
+    V1 -->|"⑤ 解码对应帧"| RV["head_rgb → [3, 480, 640]"]
+
+    style IDX fill:#fafafa,stroke:#9e9e9e,color:#000
+    style MI fill:#e1f5fe,stroke:#4fc3f7,color:#000
+    style TS fill:#fafafa,stroke:#9e9e9e,color:#000
+    style P3 fill:#fce4ec,stroke:#e91e63,color:#000
+    style P1 fill:#fff3e0,stroke:#ff9800,color:#000
+    style P2 fill:#e8f5e9,stroke:#4caf50,color:#000
+    style C1 fill:#f3e5f5,stroke:#9c27b0,color:#000
+    style V1 fill:#f3e5f5,stroke:#9c27b0,color:#000
+    style RS fill:#fce4ec,stroke:#e91e63,color:#000
+    style RI fill:#fff3e0,stroke:#ff9800,color:#000
+    style RE fill:#e8f5e9,stroke:#4caf50,color:#000
+    style RV fill:#f3e5f5,stroke:#9c27b0,color:#000
+```
+
+查询 `ds[10]`（t=0.333s）的结果：
 - `state` → 最近邻匹配 → `[7]`
 - `imu` → `(-0.033, 0]` 窗口内 33 个读数 → `[33, 6]`
 - `eeg` → `(-0.033, 0]` 窗口内 8 个读数 → `[8, 8]`
-- `head_rgb` → timestamp parquet 最近邻匹配 → `frame_index` → 解码视频对应帧 → `[3, 480, 640]`
+- `head_rgb` → timestamp parquet 最近邻 → `frame_index` → 解码对应帧 → `[3, 480, 640]`
 
 ## 2. 安装
 
