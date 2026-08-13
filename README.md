@@ -153,7 +153,7 @@ import numpy as np
 from mf_lerobot import MultiFrequencyLeRobotDataset
 
 ds = MultiFrequencyLeRobotDataset.create(
-    repo_id="my_robot", fps=30,
+    repo_id="my_robot", root="data/", fps=30,
     features={
         # 相机：dtype="video" 自动编码为 MP4
         "observation.images.cam": {
@@ -208,6 +208,20 @@ for i in range(300):
 ds.save_episode()
 ```
 
+**读取** — window feature 返回窗口内全部读数，nearest feature 返回最近邻单值：
+
+```python
+ds = MultiFrequencyLeRobotDataset(repo_id="my_robot", root="data/")
+item = ds[10]
+
+item["observation.imu"]             # tensor([33, 6]) — (-0.033, 0] 内 33 个读数
+item["observation.imu_timestamps"]  # tensor([33])
+item["observation.eeg"]             # tensor([8, 8])
+item["observation.state"]           # tensor([7]) — 最近邻
+item["observation.images.cam"]      # tensor([3, 480, 640]) — CHW
+item["task"]                        # "reach_target"
+```
+
 ```mermaid
 sequenceDiagram
     participant User
@@ -244,30 +258,22 @@ sequenceDiagram
 
 ### 4.1 每特征独立存储
 
-```mermaid
-graph TB
-    subgraph "data/chunk-000/episode_000000/"
-        MI["master_index.parquet<br/>timestamp | frame_index | task_index"]
-        F1["observation.imu.parquet<br/>1000Hz · 1980 行 · 6 列"]
-        F2["observation.eeg.parquet<br/>256Hz · 512 行 · 8 列"]
-        F3["observation.state.parquet<br/>30Hz · 60 行 · 7 列"]
-        C1["observation.images.head_rgb.parquet<br/>30Hz · 60 行 · timestamps only"]
-    end
-    subgraph "videos/chunk-000/"
-        V1["observation.images.head_rgb/<br/>episode_000000.mp4"]
-    end
+存储布局：
 
-    MI -.- F1
-    MI -.- F2
-    MI -.- F3
-    C1 -.- V1
+```
+data/
+└── chunk-000/
+    └── episode_000000/
+        ├── master_index.parquet                # timestamp | frame_index | task_index
+        ├── observation.imu.parquet             # 1000Hz · 1980 行 · 6 列
+        ├── observation.eeg.parquet             # 256Hz · 512 行 · 8 列
+        ├── observation.state.parquet           # 30Hz · 60 行 · 7 列
+        └── observation.images.head_rgb.parquet # 30Hz · 60 行 · 仅时间戳
 
-    style MI fill:#e8eaf6,stroke:#4fc3f7,stroke-width:2px,color:#000
-    style F1 fill:#e8f5e9,stroke:#66bb6a,color:#000
-    style F2 fill:#e8f5e9,stroke:#66bb6a,color:#000
-    style F3 fill:#e8f5e9,stroke:#66bb6a,color:#000
-    style C1 fill:#f3e5f5,stroke:#ce93d8,color:#000
-    style V1 fill:#f3e5f5,stroke:#ce93d8,color:#000
+videos/
+└── chunk-000/
+    └── observation.images.head_rgb/
+        └── episode_000000.mp4
 ```
 
 每个非视频 feature 一个 parquet，列格式统一：
