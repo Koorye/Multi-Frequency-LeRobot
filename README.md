@@ -56,35 +56,42 @@ flowchart LR
         P1["imu.parquet<br/>1000Hz × 6d"]
         P2["eeg.parquet<br/>256Hz × 8d"]
         P3["state.parquet<br/>30Hz × 7d"]
+        C1["head_rgb.parquet<br/>30Hz · timestamps only"]
         V1["head_rgb.mp4<br/>30fps video"]
     end
 
     subgraph Write["写入"]
         AF["add_frame(key, value)"] -->|task| MI
         AF -->|sensor| P1 & P2 & P3
-        AF -->|video| V1
+        AF -->|video| C1 & V1
     end
 
     subgraph Read["读取 ds[10]"]
-        TS["t = 0.333s"]
-        TS -->|nearest| P3
-        TS -->|"window=(-0.033, 0]"| P1
-        TS -->|decode| V1
+        IDX["ds[10]"] -->|"查第 10 帧"| MI
+        MI --> TS["t = 0.333s"]
+        TS -->|"nearest → 最近 1 行"| P3
+        TS -->|"window=(-0.033, 0] → 33 行"| P1
+        TS -->|"window=(-0.033, 0] → 8 行"| P2
+        TS -->|"nearest → frame_index"| C1
+        C1 -->|"decode(frame_index)"| V1
     end
 
     style MI fill:#e1f5fe,stroke:#4fc3f7,color:#000
     style P1 fill:#fff3e0,stroke:#ff9800,color:#000
     style P2 fill:#e8f5e9,stroke:#4caf50,color:#000
     style P3 fill:#fce4ec,stroke:#e91e63,color:#000
+    style C1 fill:#f3e5f5,stroke:#9c27b0,color:#000
     style V1 fill:#f3e5f5,stroke:#9c27b0,color:#000
     style AF fill:#fafafa,stroke:#9e9e9e,color:#000
+    style IDX fill:#fafafa,stroke:#9e9e9e,color:#000
     style TS fill:#fafafa,stroke:#9e9e9e,color:#000
 ```
 
-查询 `ds[10]`（t=0.333s）时：
+查询 `ds[10]` 时：先查 `master_index` 得到第 10 帧的时间戳 t=0.333s，再按时间戳查询各 feature：
 - `state` → 最近邻匹配 → `[7]`
 - `imu` → `(-0.033, 0]` 窗口内 33 个读数 → `[33, 6]`
-- `head_rgb` → 视频解码最近的帧 → `[3, 480, 640]`
+- `eeg` → `(-0.033, 0]` 窗口内 8 个读数 → `[8, 8]`
+- `head_rgb` → timestamp parquet 最近邻匹配 → `frame_index` → 解码视频对应帧 → `[3, 480, 640]`
 
 ## 2. 安装
 
