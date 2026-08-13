@@ -13,22 +13,29 @@
   - [1. Motivation: Why Multi-Frequency Support](#1-motivation-why-multi-frequency-support)
   - [2. Installation](#2-installation)
   - [3. Quick Start](#3-quick-start)
-  - [4. Core Concepts](#4-core-concepts)
-    - [4.1 Per-Feature Independent Storage](#41-per-feature-independent-storage)
-    - [4.2 Task as the Master Clock](#42-task-as-the-master-clock)
-    - [4.3 Window Parameter](#43-window-parameter)
-  - [5. API Reference](#5-api-reference)
+  - [4. Demo & Visualization](#4-demo--visualization)
+    - [4.1 Running the Demo](#41-running-the-demo)
+    - [4.2 Demo 1: Writing (01write_simple.py)](#42-demo-1-writing-01write_simplepy)
+    - [4.3 Demo 2: Reading (01read_simple.py)](#43-demo-2-reading-01read_simplepy)
+    - [4.4 Demo 3: Alignment Tolerance (02tolerance_example.py)](#44-demo-3-alignment-tolerance-02tolerance_examplepy)
+    - [4.5 Demo 4: Window Modes (03window_example.py)](#45-demo-4-window-modes-03window_examplepy)
+    - [4.6 Demo 5: Delta Timestamps (04delta_example.py)](#46-demo-5-delta-timestamps-04delta_examplepy)
+    - [4.7 Demo 6: Asynchronous Sensor Startup (05async_startup_example.py)](#47-demo-6-asynchronous-sensor-startup-05async_startup_examplepy)
+    - [4.8 Visualizer Controls](#48-visualizer-controls)
+  - [5. Core Concepts](#5-core-concepts)
+    - [5.1 Per-Feature Independent Storage](#51-per-feature-independent-storage)
+    - [5.2 Task as the Master Clock](#52-task-as-the-master-clock)
+    - [5.3 Window Parameter](#53-window-parameter)
+  - [6. API Reference](#6-api-reference)
     - [Creating a Dataset](#creating-a-dataset)
     - [Feature Definition Format](#feature-definition-format)
     - [Writing](#writing)
     - [Reading](#reading)
     - [Return Structure](#return-structure)
-  - [6. Architecture](#6-architecture)
-  - [7. Comparison with Native LeRobotDataset](#7-comparison-with-native-lerobotdataset)
-  - [8. Demo & Visualization](#8-demo--visualization)
-    - [Running the Demo](#running-the-demo)
-    - [Visualizer Controls](#visualizer-controls)
+  - [7. Architecture](#7-architecture)
+  - [8. Comparison with Native LeRobotDataset](#8-comparison-with-native-lerobotdataset)
   - [9. Acknowledgements](#9-acknowledgements)
+
 
 ---
 
@@ -251,9 +258,143 @@ sequenceDiagram
     DS->>DS: _check_episode_alignment()
 ```
 
-## 4. Core Concepts
+## 4. Demo & Visualization
 
-### 4.1 Per-Feature Independent Storage
+### 4.1 Running the Demo
+
+```bash
+# write 3 episodes of simulated data
+python -m examples.01write_simple
+
+# read and inspect the data
+python -m examples.01read_simple
+
+# interactive visualizer
+python -m scripts.visualize --episode 0
+```
+
+### 4.2 Demo 1: Writing (01write_simple.py)
+
+The main write demo: a full simulated robot — 3 cameras + IMU + EEG + EMG + temperature — recording three 2-second episodes (`reach_target`, `pour_liquid`, `stack_blocks`):
+
+| Sensor | Shape | Rate | Window |
+|--------|------|------|--------|
+| head_rgb | 480×640×3 | 30 fps | — (video) |
+| left_wrist_rgb | 480×640×3 | 30 fps | — (video) |
+| right_wrist_rgb | 480×640×3 | 30 fps | — (video) |
+| imu | 6 (accel+gyro) | 1000 Hz | (-0.033, 0.0) |
+| eeg | 8 (EEG channels) | 256 Hz | (-0.033, 0.0) |
+| emg_left | 4 (muscle channels) | 100 Hz | (-0.033, 0.0) |
+| emg_right | 4 (muscle channels) | 100 Hz | (-0.033, 0.0) |
+| temperature | 1 | 10 Hz | — (nearest) |
+| state | 7 (x,y,z,r,p,y,grip) | 30 Hz | — (nearest) |
+| action | 7 (velocity commands) | 30 Hz | — (nearest) |
+
+What it shows:
+
+- `dtype: "video"` features auto-encode to MP4, exactly one frame per master frame
+- high-rate sensors are written multiple times between two task calls; timestamps are auto-generated per feature as `timestamp_start + counter × 1/fps`
+- each `save_episode()` writes `master_index.parquet` + per-feature parquets + videos, then runs the alignment checker (every feature should report OK)
+
+```bash
+python -m examples.01write_simple
+```
+
+### 4.3 Demo 2: Reading (01read_simple.py)
+
+Reads the dataset written by Demo 1 and exercises every read path end to end:
+
+- window features (`observation.imu`) return all readings in the window plus their timestamps
+- nearest features (`observation.temperature`, `observation.state`, `action`) return a single vector
+- videos are decoded back to CHW tensors
+- `window_overrides` widen the IMU window at read time without touching the stored data
+- prints the IMU segment sizes across frames — the first frames are empty because the IMU only comes online at `timestamp_start: 0.1`
+
+```bash
+python -m examples.01read_simple   # needs data/ from 01write_simple
+```
+
+### 4.4 Demo 3: Alignment Tolerance (02tolerance_example.py)
+
+Shows the alignment checker catching a sensor that violates the alignment contract: the IMU is configured with `timestamp_start: 0.1` (it comes online 100 ms late) plus a tight `tolerance_s: 0.002`, so its samples are too far from the first master frames. After `save_episode()` the checker writes the offending frames to `meta/alignment_check.jsonl` and the demo prints the report.
+
+Rule of thumb: `tolerance_s` must cover the distance from a master frame to the sensor's nearest sample — at most half its period (e.g. ≤ 50 ms for a 10 Hz sensor) — plus startup offset and jitter.
+
+```bash
+python -m examples.02tolerance_example
+```
+
+### 4.5 Demo 4: Window Modes (03window_example.py)
+
+One episode, three aggregation modes side by side:
+
+- `observation.imu` at 1000 Hz with `window: (-0.033, 0.0)` — range query, ~33 readings per frame
+- `observation.finger_pose` at 120 Hz with `window: "interpolate"` — value interpolated at the frame timestamp
+- `observation.temperature` at 10 Hz with no window — nearest neighbor
+
+Then the dataset is reopened with `window_overrides` — a wider IMU window, finger pose switched to a range query — proving that the window is a read-time decision, not a property of the stored data.
+
+```bash
+python -m examples.03window_example
+```
+
+### 4.6 Demo 5: Delta Timestamps (04delta_example.py)
+
+Multi-frame temporal queries with `delta_timestamps={"observation.state": [-0.1, 0.0, 0.1]}`: reading `ds[i]` returns state stacked over three timepoints (t-0.1, t, t+0.1) instead of one vector — the building block for delta-pose training and temporal augmentation.
+
+```bash
+python -m examples.04delta_example
+```
+
+### 4.7 Demo 6: Asynchronous Sensor Startup (05async_startup_example.py)
+
+Real sensors don't come online at the same instant: after the process starts, each one returns its first frame at its own wall-clock time (IMU at 0.04 s, EMG at 0.12 s, EEG amplifier at 0.31 s, …). This demo simulates such streams and aligns them to the master clock **before** adding data:
+
+1. **t_all_started** — the wall-clock moment every sensor has delivered its first frame (the max of all first-frame times).
+2. **t = 0** — the master clock reference sensor's first frame at/after `t_all_started`; its earlier frames are discarded.
+3. **timestamp_start** — for every other sensor, the delta between its next frame (first frame at/after t = 0) and the t = 0 frame; set it in the feature spec so the stored timestamps stay phase-aligned with the master clock.
+4. **Record** everything from t = 0 onward. The episode ends when the master clock stops, but each sensor keeps streaming until its **next frame after the master's last one** — that trailing sample keeps the last frame's window full.
+
+Simulated startup latencies:
+
+| Sensor | Rate | First frame (wall clock) |
+|--------|------|--------------------------|
+| `observation.imu` | 1000 Hz | 0.04 s |
+| `observation.emg` | 100 Hz | 0.12 s |
+| `observation.state` (master clock reference) | 30 Hz | 0.18 s |
+| `observation.temperature` | 10 Hz | 0.22 s |
+| `action` | 30 Hz | 0.24 s |
+| `observation.eeg` | 256 Hz | 0.31 s |
+
+The demo computes `t_all_started = 0.31 s`, takes the master's next frame as t = 0, derives each sensor's `timestamp_start`, writes the dataset, verifies on disk that every feature's first stored timestamp equals its `timestamp_start` and that its last sample lands past the master stop, then reads back frame 0, a mid-episode frame, and the last frame.
+
+Two consequences worth knowing:
+
+- **Frame 0's backward window is empty.** Every sensor's first stored frame sits at its own `timestamp_start` > 0 and earlier data is discarded by design, so a window like `(-0.033, 0.0)` has nothing to return on the first frame(s).
+- **Tolerance must cover half the sensor's period.** The alignment checker compares each master frame against the sensor's *nearest* sample, whose distance is at most half a period (a 10 Hz sensor can be up to 50 ms away) plus jitter — e.g. `tolerance_s: 0.06` for the 10 Hz temperature sensor here.
+
+```bash
+python -m examples.05async_startup_example
+```
+
+### 4.8 Visualizer Controls
+
+**Visualizer** (`python -m scripts.visualize --episode 0`):
+
+![Visualizer screenshot](examples/visualize.png)
+
+```
+space    — play / pause
+← →      — step frame backward / forward
+↑ ↓      — faster / slower playback
+w s      — widen / shrink the window
+q / Esc  — quit
+```
+
+
+## 5. Core Concepts
+
+### 5.1 Per-Feature Independent Storage
 
 Storage layout:
 
@@ -283,12 +424,12 @@ timestamp (float64) | episode_index (int64) | col_0 (float32) | ... | col_D (flo
 - high-rate features (imu, eeg): multiple samples between frames, rows = rate × duration
 - camera features: timestamp parquet + MP4 video
 
-### 4.2 Task as the Master Clock
+### 5.2 Task as the Master Clock
 
 The whole dataset is organized around **task calls as frame boundaries**: `add_frame("task", ...)` declares "the current frame ends here, the next one begins".
 
 - **Frame** = all feature data written between two task calls. `add_frame("task", ...)` auto-generates the frame timestamp: `t = frame_index / fps` (override with `timestamp=` if needed)
-- **Master clock** = the frame sequence. Reading `ds[i]` first looks up the i-th frame timestamp t in `master_index`; every feature is then aligned around t (window / nearest neighbor, see 4.3)
+- **Master clock** = the frame sequence. Reading `ds[i]` first looks up the i-th frame timestamp t in `master_index`; every feature is then aligned around t (window / nearest neighbor, see 5.3)
 - **Each feature's timestamps are generated independently** of the master clock: one counter per feature, `ts = timestamp_start + counter × (1 / fps)` on each `add_frame`; counters reset after `save_episode()`
 - **No master_feature to configure** — task is the master clock, and features of any sampling rate align to it
 
@@ -301,7 +442,7 @@ ds.add_frame("observation.state", ...) # camera-rate sensor, once per frame
 ds.add_frame("observation.images.cam", image)
 ```
 
-### 4.3 Window Parameter
+### 5.3 Window Parameter
 
 The master-clock frame timestamp is the query anchor, but a feature's readings don't necessarily land on a frame — `window` defines "how to aggregate that feature's readings around the frame timestamp":
 
@@ -331,7 +472,8 @@ ds = MultiFrequencyLeRobotDataset(
 
 Note that temperature (10Hz) has no sample at 0.333 — its sampling grid is 0.3, 0.4, …, so nearest neighbor falls back to the reading at t=0.300.
 
-## 5. API Reference
+
+## 6. API Reference
 
 ### Creating a Dataset
 
@@ -380,7 +522,7 @@ features = {
 | `shape` | `tuple` | ✓ | shape of a single reading: `(D,)` for numeric features, `(H, W, C)` for video |
 | `names` | `list[str]` | ✓ | column name per dimension (used as parquet column names) |
 | `fps` | `float` | optional | sampling rate of this feature; timestamps are auto-generated as `timestamp_start + counter × 1/fps`; falls back to master-clock `fps` if omitted |
-| `window` | `None \| "interpolate" \| (start, end)` | `None` | how readings are aggregated at query time (see 4.3) |
+| `window` | `None \| "interpolate" \| (start, end)` | `None` | how readings are aggregated at query time (see 5.3) |
 | `timestamp_start` | `float` | `0.0` | timestamp start offset, e.g. the sensor only starts recording at t=0.1s |
 | `tolerance_s` | `float` | `None` | alignment tolerance: after `save_episode()`, per-frame nearest-reading gaps are checked and violations are logged to `meta/alignment_check.jsonl` |
 
@@ -475,7 +617,7 @@ item = ds[10]
 # }
 ```
 
-## 6. Architecture
+## 7. Architecture
 
 ```mermaid
 flowchart TB
@@ -549,7 +691,7 @@ src/mf_lerobot/
 
 4. **Inherit, don't rewrite**: inherit `LeRobotDataset` for `start_image_writer`, `_save_image` and other basics; only 4 core methods are overridden.
 
-## 7. Comparison with Native LeRobotDataset
+## 8. Comparison with Native LeRobotDataset
 
 | Aspect | Native LeRobotDataset | mf_lerobot |
 |------|-------------------|------------|
@@ -564,63 +706,6 @@ src/mf_lerobot/
 | Write API | `add_frame(frame_dict, task)` | `add_frame(key, value)` per field |
 | Alignment check | none | automatic `alignment_check.jsonl` |
 | Video check | none | automatic frame count/duration check |
-
-## 8. Demo & Visualization
-
-### Running the Demo
-
-```bash
-# write 3 episodes of simulated data
-python -m examples.01write_simple
-
-# read and inspect the data
-python -m examples.01read_simple
-
-# interactive visualizer
-python -m scripts.visualize --episode 0
-```
-
-Numbered examples (`examples/`):
-
-| Script | What it does |
-|--------|--------------|
-| `01write_simple.py` | main write demo: 3 cameras + IMU + EEG + EMG + temperature, 3 two-second episodes |
-| `01read_simple.py` | main read demo: window / nearest / read-time override / camera decoding (needs data from 01write_simple) |
-| `02tolerance_example.py` | alignment check: late sensor start + tight tolerance → prints `meta/alignment_check.jsonl` |
-| `03window_example.py` | compares the three window modes: range / interpolate / nearest, plus read-time override |
-| `04delta_example.py` | `delta_timestamps` multi-frame query: state at t-0.1 / t / t+0.1 |
-
-Sensors included in the demo:
-
-| Sensor | Shape | Rate | Window |
-|--------|------|------|--------|
-| head_rgb | 480×640×3 | 30 fps | — (video) |
-| left_wrist_rgb | 480×640×3 | 30 fps | — (video) |
-| right_wrist_rgb | 480×640×3 | 30 fps | — (video) |
-| imu | 6 (accel+gyro) | 1000 Hz | (-0.033, 0.0) |
-| eeg | 8 (EEG channels) | 256 Hz | (-0.033, 0.0) |
-| emg_left | 4 (muscle channels) | 100 Hz | (-0.033, 0.0) |
-| emg_right | 4 (muscle channels) | 100 Hz | (-0.033, 0.0) |
-| temperature | 1 | 10 Hz | — (nearest) |
-| state | 7 (x,y,z,r,p,y,grip) | 30 Hz | — (nearest) |
-| action | 7 (velocity commands) | 30 Hz | — (nearest) |
-
-Three 2-second episodes: `reach_target`, `pour_liquid`, `stack_blocks`.
-
-**Visualizer** (`python -m scripts.visualize --episode 0`):
-
-![Visualizer screenshot](examples/visualize.png)
-
-### Visualizer Controls
-
-```
-space    — play / pause
-← →      — step frame backward / forward
-↑ ↓      — faster / slower playback
-w s      — widen / shrink the window
-q / Esc  — quit
-```
-
 
 ## 9. Acknowledgements
 

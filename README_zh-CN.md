@@ -13,22 +13,29 @@
   - [1. 动机：为什么需要多频率支持](#1-动机为什么需要多频率支持)
   - [2. 安装](#2-安装)
   - [3. 快速开始](#3-快速开始)
-  - [4. 核心概念](#4-核心概念)
-    - [4.1 每特征独立存储](#41-每特征独立存储)
-    - [4.2 Task 即主时钟](#42-task-即主时钟)
-    - [4.3 Window 参数](#43-window-参数)
-  - [5. API 参考](#5-api-参考)
+  - [4. Demo 与可视化](#4-demo-与可视化)
+    - [4.1 运行 Demo](#41-运行-demo)
+    - [4.2 Demo 1：写入（01write_simple.py）](#42-demo-1写入01write_simplepy)
+    - [4.3 Demo 2：读取（01read_simple.py）](#43-demo-2读取01read_simplepy)
+    - [4.4 Demo 3：对齐容差（02tolerance_example.py）](#44-demo-3对齐容差02tolerance_examplepy)
+    - [4.5 Demo 4：Window 模式（03window_example.py）](#45-demo-4window-模式03window_examplepy)
+    - [4.6 Demo 5：Delta 时间戳（04delta_example.py）](#46-demo-5delta-时间戳04delta_examplepy)
+    - [4.7 Demo 6：异步传感器启动（05async_startup_example.py）](#47-demo-6异步传感器启动05async_startup_examplepy)
+    - [4.8 可视化操作](#48-可视化操作)
+  - [5. 核心概念](#5-核心概念)
+    - [5.1 每特征独立存储](#51-每特征独立存储)
+    - [5.2 Task 即主时钟](#52-task-即主时钟)
+    - [5.3 Window 参数](#53-window-参数)
+  - [6. API 参考](#6-api-参考)
     - [创建数据集](#创建数据集)
     - [Feature 定义格式](#feature-定义格式)
     - [写入](#写入)
     - [读取](#读取)
     - [读取返回结构](#读取返回结构)
-  - [6. 架构设计](#6-架构设计)
-  - [7. 与原生 LeRobotDataset 对比](#7-与原生-lerobotdataset-对比)
-  - [8. Demo 与可视化](#8-demo-与可视化)
-    - [运行 Demo](#运行-demo)
-    - [可视化操作](#可视化操作)
+  - [7. 架构设计](#7-架构设计)
+  - [8. 与原生 LeRobotDataset 对比](#8-与原生-lerobotdataset-对比)
   - [9. 致谢](#9-致谢)
+
 
 ---
 
@@ -251,9 +258,143 @@ sequenceDiagram
     DS->>DS: _check_episode_alignment()
 ```
 
-## 4. 核心概念
+## 4. Demo 与可视化
 
-### 4.1 每特征独立存储
+### 4.1 运行 Demo
+
+```bash
+# 写入 3 个 episode 的模拟数据
+python -m examples.01write_simple
+
+# 读取并检查数据
+python -m examples.01read_simple
+
+# 交互式可视化
+python -m scripts.visualize --episode 0
+```
+
+### 4.2 Demo 1：写入（01write_simple.py）
+
+主写 demo：一个完整的模拟机器人 —— 3 路相机 + IMU + EEG + EMG + temperature，录制三个 2 秒 episode（`reach_target`、`pour_liquid`、`stack_blocks`）：
+
+| 传感器 | 维度 | 频率 | Window |
+|--------|------|------|--------|
+| head_rgb | 480×640×3 | 30 fps | — (video) |
+| left_wrist_rgb | 480×640×3 | 30 fps | — (video) |
+| right_wrist_rgb | 480×640×3 | 30 fps | — (video) |
+| imu | 6 (accel+gyro) | 1000 Hz | (-0.033, 0.0) |
+| eeg | 8 (脑电通道) | 256 Hz | (-0.033, 0.0) |
+| emg_left | 4 (肌肉通道) | 100 Hz | (-0.033, 0.0) |
+| emg_right | 4 (肌肉通道) | 100 Hz | (-0.033, 0.0) |
+| temperature | 1 | 10 Hz | — (nearest) |
+| state | 7 (x,y,z,r,p,y,grip) | 30 Hz | — (nearest) |
+| action | 7 (速度指令) | 30 Hz | — (nearest) |
+
+它演示了：
+
+- `dtype: "video"` 的 feature 自动编码为 MP4，每个主帧恰好一帧视频
+- 高频传感器在两次 task 调用之间写入多次；每个 feature 的时间戳自动生成：`timestamp_start + counter × 1/fps`
+- 每次 `save_episode()` 写入 `master_index.parquet` + 各 feature 的 parquet + 视频，然后运行对齐校验（所有 feature 都应显示 OK）
+
+```bash
+python -m examples.01write_simple
+```
+
+### 4.3 Demo 2：读取（01read_simple.py）
+
+读取 Demo 1 写出的数据集，端到端地演示每条读取路径：
+
+- window feature（`observation.imu`）返回窗口内全部读数及其时间戳
+- nearest feature（`observation.temperature`、`observation.state`、`action`）返回单个向量
+- 视频解码回 CHW 张量
+- `window_overrides` 在读取时加宽 IMU 窗口，不改动已存储的数据
+- 打印各帧 IMU 段大小 —— 前几帧为空，因为 IMU 从 `timestamp_start: 0.1` 才开始有数据
+
+```bash
+python -m examples.01read_simple   # 依赖 01write_simple 的数据
+```
+
+### 4.4 Demo 3：对齐容差（02tolerance_example.py）
+
+演示对齐校验如何捕获违反对齐约定的传感器：IMU 配置了 `timestamp_start: 0.1`（迟到 100 ms 上线）和严格的 `tolerance_s: 0.002`，其采样离前几个主帧过远。`save_episode()` 后，校验器把违规帧写入 `meta/alignment_check.jsonl`，demo 再打印这份报告。
+
+经验法则：`tolerance_s` 必须覆盖主帧到传感器最近采样的距离 —— 最多半个周期（例如 10 Hz 传感器 ≤ 50 ms）—— 再加上启动偏移与抖动。
+
+```bash
+python -m examples.02tolerance_example
+```
+
+### 4.5 Demo 4：Window 模式（03window_example.py）
+
+一个 episode，三种聚合模式并列对比：
+
+- `observation.imu` 1000 Hz，`window: (-0.033, 0.0)` —— 区间查询，每帧约 33 条读数
+- `observation.finger_pose` 120 Hz，`window: "interpolate"` —— 在帧时间戳处插值
+- `observation.temperature` 10 Hz，无 window —— 最近邻
+
+随后用 `window_overrides` 重新打开数据集 —— IMU 窗口加宽、finger pose 改为区间查询 —— 证明 window 是读取时的决定，而不是存储数据的固有属性。
+
+```bash
+python -m examples.03window_example
+```
+
+### 4.6 Demo 5：Delta 时间戳（04delta_example.py）
+
+`delta_timestamps={"observation.state": [-0.1, 0.0, 0.1]}` 多帧时序查询：读取 `ds[i]` 时 state 返回三个时间点（t-0.1、t、t+0.1）的堆叠结果，而不是单个向量 —— 这是 delta 位姿训练与时序增广的基础。
+
+```bash
+python -m examples.04delta_example
+```
+
+### 4.7 Demo 6：异步传感器启动（05async_startup_example.py）
+
+真实传感器不会在同一瞬间上线：进程启动后，每个传感器以自己的墙钟时间返回首帧（IMU 在 0.04 s，EMG 在 0.12 s，脑电放大器在 0.31 s，…）。本 demo 模拟这样的数据流，并在添加数据**之前**与主时钟对齐：
+
+1. **t_all_started** —— 所有传感器都已返回首帧的墙钟时刻（各首帧时间的最大值）。
+2. **t = 0** —— 主时钟参考传感器在 `t_all_started` 之后（含）的第一帧；此前的帧全部丢弃。
+3. **timestamp_start** —— 其余每个传感器在 t = 0 之后的下一帧与该帧的差值，写入 feature 定义，使存储的时间戳与主时钟保持相位对齐。
+4. **添加数据** —— 从 t = 0 开始记录。episode 在主时钟停止时结束，但每个传感器继续产生数据直到**主时钟最后一帧之后的下一帧**——这个尾部样本保证最后一帧的 window 依然有数据。
+
+模拟的启动延迟：
+
+| 传感器 | 频率 | 首帧（墙钟） |
+|--------|------|--------------------------|
+| `observation.imu` | 1000 Hz | 0.04 s |
+| `observation.emg` | 100 Hz | 0.12 s |
+| `observation.state`（主时钟参考） | 30 Hz | 0.18 s |
+| `observation.temperature` | 10 Hz | 0.22 s |
+| `action` | 30 Hz | 0.24 s |
+| `observation.eeg` | 256 Hz | 0.31 s |
+
+demo 算出 `t_all_started = 0.31 s`，取主时钟的下一帧作为 t = 0，推导每个传感器的 `timestamp_start`，写入数据集，并在磁盘上校验：每个 feature 的首条存储时间戳等于其 `timestamp_start`、末条采样落在主时钟停止之后；随后读回第 0 帧、中间帧与最后一帧。
+
+两个值得注意的推论：
+
+- **第 0 帧的向后 window 为空。** 每个传感器的首条存储帧都落在各自的 `timestamp_start` > 0 处，更早的数据按设计被丢弃，因此 `(-0.033, 0.0)` 这类 window 在开头几帧没有数据可返回。
+- **容差必须覆盖传感器半个周期。** 对齐校验对比的是每个主帧与传感器*最近*采样的距离，最坏为半个周期（10 Hz 传感器最远可差 50 ms）再加抖动——例如这里 10 Hz 的 temperature 设为 `tolerance_s: 0.06`。
+
+```bash
+python -m examples.05async_startup_example
+```
+
+### 4.8 可视化操作
+
+**可视化效果**（`python -m scripts.visualize --episode 0`）：
+
+![可视化效果截图](examples/visualize.png)
+
+```
+space    — 播放/暂停
+← →      — 逐帧前进/后退
+↑ ↓      — 加速/减速播放
+w s      — 扩大/缩小窗口
+q / Esc  — 退出
+```
+
+
+## 5. 核心概念
+
+### 5.1 每特征独立存储
 
 存储布局：
 
@@ -283,12 +424,12 @@ timestamp (float64) | episode_index (int64) | col_0 (float32) | ... | col_D (flo
 - 高频特征（imu, eeg）：帧间多次采样，行数 = 频率 × 时长
 - 相机特征：timestamp parquet + MP4 视频
 
-### 4.2 Task 即主时钟
+### 5.2 Task 即主时钟
 
 整个数据集以 **task 调用为帧边界**组织：`add_frame("task", ...)` 声明"当前帧到此结束，下一帧开始"。
 
 - **帧** = 两次 task 调用之间写入的所有 feature 数据。`add_frame("task", ...)` 时自动生成帧时间戳：`t = frame_index / fps`（也可用 `timestamp=` 手动传入覆盖）
-- **主时钟** = 帧序列。读取 `ds[i]` 时先查 `master_index` 得到第 i 帧的时间戳 t，所有 feature 再围绕 t 对齐（window / 最近邻，见 4.3）
+- **主时钟** = 帧序列。读取 `ds[i]` 时先查 `master_index` 得到第 i 帧的时间戳 t，所有 feature 再围绕 t 对齐（window / 最近邻，见 5.3）
 - **各 feature 的时间戳独立生成**，与主时钟无关：每个 feature 一个计数器，`add_frame` 时 `ts = timestamp_start + counter × (1 / fps)`；计数器在 `save_episode()` 后归零
 
 ```python
@@ -300,7 +441,7 @@ ds.add_frame("observation.state", ...) # 相机帧率传感器，每帧一次
 ds.add_frame("observation.images.cam", image)
 ```
 
-### 4.3 Window 参数
+### 5.3 Window 参数
 
 主时钟的帧时间戳是查询基准，但 feature 的读数时刻并不一定落在帧上——`window` 定义"如何围绕帧时间戳聚合该 feature 的读数"：
 
@@ -330,7 +471,8 @@ ds = MultiFrequencyLeRobotDataset(
 
 注意 temperature（10Hz）在 0.333 处没有采样点——采样网格是 0.3、0.4、…，最近邻自动回退到 t=0.300 的读数。
 
-## 5. API 参考
+
+## 6. API 参考
 
 ### 创建数据集
 
@@ -379,7 +521,7 @@ features = {
 | `shape` | `tuple` | ✓ | 单个读数的形状：数值 feature 为 `(D,)`，视频为 `(H, W, C)` |
 | `names` | `list[str]` | ✓ | 每个维度的列名（作为 parquet 列名） |
 | `fps` | `float` | 可选 | 该 feature 的采样率，自动生成时间戳 `timestamp_start + counter × 1/fps`；不填回退到主时钟 `fps` |
-| `window` | `None \| "interpolate" \| (start, end)` | `None` | 查询时如何聚合读数（见 4.3） |
+| `window` | `None \| "interpolate" \| (start, end)` | `None` | 查询时如何聚合读数（见 5.3） |
 | `timestamp_start` | `float` | `0.0` | 时间戳起始偏移，如传感器在 t=0.1s 才开始记录 |
 | `tolerance_s` | `float` | `None` | 对齐容差：`save_episode()` 后检查每帧最近读数的偏差，超差记录到 `meta/alignment_check.jsonl` |
 
@@ -474,7 +616,7 @@ item = ds[10]
 # }
 ```
 
-## 6. 架构设计
+## 7. 架构设计
 
 ```mermaid
 flowchart TB
@@ -548,7 +690,7 @@ src/mf_lerobot/
 
 4. **继承而非重写**：继承 `LeRobotDataset` 获取 `start_image_writer`、`_save_image` 等基础能力，只覆写核心的 4 个方法。
 
-## 7. 与原生 LeRobotDataset 对比
+## 8. 与原生 LeRobotDataset 对比
 
 | 特性 | 原生 LeRobotDataset | mf_lerobot |
 |------|-------------------|------------|
@@ -563,63 +705,6 @@ src/mf_lerobot/
 | 写入 API | `add_frame(frame_dict, task)` | `add_frame(key, value)` per-field |
 | 对齐校验 | 无 | 自动检查 `alignment_check.jsonl` |
 | 视频校验 | 无 | 自动检查帧数/时长 |
-
-## 8. Demo 与可视化
-
-### 运行 Demo
-
-```bash
-# 写入 3 个 episode 的模拟数据
-python -m examples.01write_simple
-
-# 读取并检查数据
-python -m examples.01read_simple
-
-# 交互式可视化
-python -m scripts.visualize --episode 0
-```
-
-编号示例程序（`examples/`）：
-
-| 程序 | 说明 |
-|------|------|
-| `01write_simple.py` | 主写 demo：3 路相机 + IMU + EEG + EMG + temperature，写入 3 个 2 秒 episode |
-| `01read_simple.py` | 主读 demo：window / nearest / 读取时覆盖 / 相机解码（依赖 01write_simple 的数据） |
-| `02tolerance_example.py` | 对齐校验：传感器延迟启动 + 严格容差 → 打印 `meta/alignment_check.jsonl` |
-| `03window_example.py` | 对比三种 window：区间 / interpolate / nearest，以及读取时覆盖 |
-| `04delta_example.py` | `delta_timestamps` 多帧查询：state 同时取 t-0.1 / t / t+0.1 |
-
-Demo 包含的传感器：
-
-| 传感器 | 维度 | 频率 | Window |
-|--------|------|------|--------|
-| head_rgb | 480×640×3 | 30 fps | — (video) |
-| left_wrist_rgb | 480×640×3 | 30 fps | — (video) |
-| right_wrist_rgb | 480×640×3 | 30 fps | — (video) |
-| imu | 6 (accel+gyro) | 1000 Hz | (-0.033, 0.0) |
-| eeg | 8 (脑电通道) | 256 Hz | (-0.033, 0.0) |
-| emg_left | 4 (肌肉通道) | 100 Hz | (-0.033, 0.0) |
-| emg_right | 4 (肌肉通道) | 100 Hz | (-0.033, 0.0) |
-| temperature | 1 | 10 Hz | — (nearest) |
-| state | 7 (x,y,z,r,p,y,grip) | 30 Hz | — (nearest) |
-| action | 7 (速度指令) | 30 Hz | — (nearest) |
-
-三个 2 秒 episode：`reach_target`、`pour_liquid`、`stack_blocks`。
-
-**可视化效果**（`python -m scripts.visualize --episode 0`）：
-
-![可视化效果截图](examples/visualize.png)
-
-### 可视化操作
-
-```
-space    — 播放/暂停
-← →      — 逐帧前进/后退
-↑ ↓      — 加速/减速播放
-w s      — 扩大/缩小窗口
-q / Esc  — 退出
-```
-
 
 ## 9. 致谢
 
