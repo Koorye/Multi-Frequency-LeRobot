@@ -13,11 +13,8 @@
   - [3. 快速开始](#3-快速开始)
   - [4. 核心概念](#4-核心概念)
     - [4.1 每特征独立存储](#41-每特征独立存储)
-    - [4.2 Window 参数](#42-window-参数)
-    - [4.3 Task 即主时钟](#43-task-即主时钟)
-    - [4.4 时间戳自动生成](#44-时间戳自动生成)
-    - [4.5 对齐校验](#45-对齐校验)
-    - [4.6 视频帧校验](#46-视频帧校验)
+    - [4.2 Task 即主时钟](#42-task-即主时钟)
+    - [4.3 Window 参数](#43-window-参数)
   - [5. API 参考](#5-api-参考)
     - [创建数据集](#创建数据集)
     - [Feature 定义格式](#feature-定义格式)
@@ -286,9 +283,26 @@ timestamp (float64) | episode_index (int64) | col_0 (float32) | ... | col_D (flo
 - 高频特征（imu, eeg）：帧间多次采样，行数 = 频率 × 时长
 - 相机特征：timestamp parquet + MP4 视频
 
-### 4.2 Window 参数
+### 4.2 Task 即主时钟
 
-每个 feature 可定义 `window`，控制查询时如何聚合数据：
+整个数据集以 **task 调用为帧边界**组织：`add_frame("task", ...)` 声明"当前帧到此结束，下一帧开始"。
+
+- **帧** = 两次 task 调用之间写入的所有 feature 数据。`add_frame("task", ...)` 时自动生成帧时间戳：`t = frame_index / fps`（也可用 `timestamp=` 手动传入覆盖）
+- **主时钟** = 帧序列。读取 `ds[i]` 时先查 `master_index` 得到第 i 帧的时间戳 t，所有 feature 再围绕 t 对齐（window / 最近邻，见 4.3）
+- **各 feature 的时间戳独立生成**，与主时钟无关：每个 feature 一个计数器，`add_frame` 时 `ts = timestamp_start + counter × (1 / fps)`；计数器在 `save_episode()` 后归零
+
+```python
+# 每帧的标准调用顺序：高频先写 → task 定边界 → 低频收尾
+ds.add_frame("observation.imu", ...)   # 高频传感器，帧间多次写入
+ds.add_frame("observation.eeg", ...)
+ds.add_frame("task", "pick_up")        # ← 帧边界：frame_index++，落主时钟时间戳
+ds.add_frame("observation.state", ...) # 相机帧率传感器，每帧一次
+ds.add_frame("observation.images.cam", image)
+```
+
+### 4.3 Window 参数
+
+主时钟的帧时间戳是查询基准，但 feature 的读数时刻并不一定落在帧上——`window` 定义"如何围绕帧时间戳聚合该 feature 的读数"：
 
 | `window` 值 | 行为 | 适用场景 |
 |------------|------|---------|
@@ -310,72 +324,11 @@ ds = MultiFrequencyLeRobotDataset(
 )
 ```
 
-```mermaid
-gantt
-    title 查询 t=0.333s 时的窗口
-    dateFormat  s.SSS
-    axisFormat %S.%L
+**查询 t = 0.333s（第 10 帧）时各 feature 的取数：**
 
-    section 1000Hz IMU
-    窗口读数 (-0.033, 0]  : 0.300, 0.033s
-    查询点 t=0.333       : milestone, 0.333, 0s
+![查询 t = 0.333s（第 10 帧）时各 feature 的取数](assets/window_query.png)
 
-    section 256Hz EEG
-    窗口读数 (-0.033, 0]  : 0.300, 0.033s
-
-    section 30Hz State
-    最近邻                : milestone, 0.333, 0s
-
-    section 10Hz Temp
-    最近邻 (t=0.300)       : milestone, 0.300, 0s
-```
-
-### 4.3 Task 即主时钟
-
-`add_frame("task", "reach_target")` 定义帧边界。task 的时间戳自动根据 FPS 生成（或手动传入），所有 feature 以此时戳为对齐基准。**无需指定 master_feature**——task 就是主时钟。
-
-```python
-# 每帧的标准调用顺序
-ds.add_frame("observation.imu", ...)   # 高频传感器先写
-ds.add_frame("observation.eeg", ...)
-ds.add_frame("task", "pick_up")        # ← 帧边界
-ds.add_frame("observation.state", ...) # 相机帧率传感器
-ds.add_frame("observation.images.cam", image)
-```
-
-### 4.4 时间戳自动生成
-
-每个 feature 声明自己的 `fps`，dataset 内部维护计数器，`add_frame` 时自动生成时间戳：
-
-```
-ts = timestamp_start + counter × (1 / fps)
-```
-
-- `timestamp_start`：可选偏移量，如 IMU 从 0.1s 开始记录
-- 计数器在 `save_episode()` 后归零
-
-### 4.5 对齐校验
-
-`save_episode()` 后自动对每个定义了 `tolerance_s` 的 feature 进行校验：
-
-- 对每个 master 帧的时间戳，寻找 feature 的最近读数
-- 时间差 > `tolerance_s` → 记录到 `meta/alignment_check.jsonl`
-- 典型问题：传感器启动延迟、采样率偏差、数据丢失
-
-```
-[ALIGN] episode 0, feature 'observation.imu': 3/60 frames exceed tolerance_s=0.002:
-  frame 0 (t=0.0000) nearest at t=0.1000, diff=0.1000s
-  frame 1 (t=0.0333) nearest at t=0.1000, diff=0.0667s
-  frame 2 (t=0.0667) nearest at t=0.1000, diff=0.0333s
-```
-
-### 4.6 视频帧校验
-
-每个 camera encode 后，用 pyav 打开 MP4，校验帧数与 episode 长度一致：
-
-```
-[VIDEO] episode 0, 'observation.images.head_rgb': OK (60f, 30.0fps, duration 2.00s)
-```
+注意 temperature（10Hz）在 0.333 处没有采样点——采样网格是 0.3、0.4、…，最近邻自动回退到 t=0.300 的读数。
 
 ## 5. API 参考
 
@@ -383,28 +336,34 @@ ts = timestamp_start + counter × (1 / fps)
 
 ```python
 ds = MultiFrequencyLeRobotDataset.create(
-    repo_id: str,                  # 数据集名称
-    fps: float,                    # 主时钟帧率
-    features: dict[str, dict],     # 特征定义
-    root: Path | None = None,     # 存储路径
-    robot_type: str | None = None,
-    use_videos: bool = True,
-    image_writer_processes: int = 0,
-    image_writer_threads: int = 0,
-    video_backend: str | None = None,
-    batch_encoding_size: int = 1,
-    window_overrides: dict | None = None,
+    repo_id="my_robot",
+    fps=30,
+    features={...},          # 见下文 Feature 定义格式
 )
 ```
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `repo_id` | `str` | — | 数据集名称，`root` 下的存储目录名 |
+| `fps` | `float` | — | 主时钟帧率，帧时间戳 = `frame_index / fps` |
+| `features` | `dict[str, dict]` | — | 特征定义，格式见下文 |
+| `root` | `str \| Path` | `~/.cache/huggingface/lerobot/<repo_id>` | 存储根目录 |
+| `robot_type` | `str` | `None` | 机器人类型，仅写入元数据 |
+| `use_videos` | `bool` | `True` | `dtype="video"` 的特征是否编码为 MP4 |
+| `image_writer_processes` | `int` | `0` | 图像写入子进程数（0 = 主进程内写入） |
+| `image_writer_threads` | `int` | `0` | 图像写入线程数 |
+| `video_backend` | `str` | `None` | 视频后端（如 `"pyav"`），`None` 自动选择 |
+| `batch_encoding_size` | `int` | `1` | 每 N 个 episode 批量编码一次视频 |
+| `window_overrides` | `dict` | `None` | 覆盖各 feature 的 window（格式同读取时） |
 
 ### Feature 定义格式
 
 ```python
 features = {
     "feature_key": {
-        "dtype": "video" | "float32" | "int64",
-        "shape": (H, W, C) | (D,),
-        "names": ["col_0", ...] | None,
+        "dtype": "video" | "float32" | "int64",   # 必填
+        "shape": (H, W, C) | (D,),                # 必填
+        "names": ["col_0", ...],                  # 必填
         # 可选：
         "fps": 1000,              # 此 feature 的采样率
         "window": (-0.033, 0.0),  # 查询窗口
@@ -414,6 +373,22 @@ features = {
 }
 ```
 
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `dtype` | `str` | ✓ | 存储类型：`"float32"`（连续量）、`"int64"`（离散量/id）、`"video"`（相机帧） |
+| `shape` | `tuple` | ✓ | 单个读数的形状：数值 feature 为 `(D,)`，视频为 `(H, W, C)` |
+| `names` | `list[str]` | ✓ | 每个维度的列名（作为 parquet 列名） |
+| `fps` | `float` | 可选 | 该 feature 的采样率，自动生成时间戳 `timestamp_start + counter × 1/fps`；不填回退到主时钟 `fps` |
+| `window` | `None \| "interpolate" \| (start, end)` | `None` | 查询时如何聚合读数（见 4.3） |
+| `timestamp_start` | `float` | `0.0` | 时间戳起始偏移，如传感器在 t=0.1s 才开始记录 |
+| `tolerance_s` | `float` | `None` | 对齐容差：`save_episode()` 后检查每帧最近读数的偏差，超差记录到 `meta/alignment_check.jsonl` |
+
+约定与提示：
+
+- feature key 遵循 LeRobot 命名约定，**不可包含 `/`**（如 `observation.imu`、`action`）
+- `dtype="video"` 的特征只存时间戳 parquet，图像编码为 MP4 存在 `videos/` 下
+- 高频 feature 务必同时给 `fps` + `window`——否则查询按最近邻只返回 1 个读数，高频信息会丢失
+
 ### 写入
 
 ```python
@@ -422,14 +397,35 @@ ds.add_frame(key: str, value: np.ndarray | torch.Tensor | str,
 ds.save_episode()
 ```
 
+- `key`：`"task"` 或已定义的 feature key
+- `value`：数值 feature 为 `np.ndarray` / `torch.Tensor`（形状须匹配 `shape`）；视频 feature 为 `np.ndarray` (H, W, C)；task 为 `str` 任务标签
+- `timestamp`：`None` 时自动生成——task 用主时钟 `len(records) / fps`，其他 feature 用自身计数器 `timestamp_start + counter × 1/fps`；传 `float` 则手动指定
+
+完整写循环：
+
+```python
+FPS = 30
+imu_per_frame = 1000 // FPS   # 33
+eeg_per_frame = 256 // FPS    # 8
+
+for frame in range(60):                        # 2 秒 / 30fps
+    for _ in range(imu_per_frame):             # 高频：每帧多次写入
+        ds.add_frame("observation.imu", imu_sample)
+    for _ in range(eeg_per_frame):
+        ds.add_frame("observation.eeg", eeg_sample)
+
+    ds.add_frame("task", "reach_target")       # ← 帧边界
+
+    ds.add_frame("observation.state", joint_state)    # 低频：每帧一次
+    ds.add_frame("action", action_cmd)
+    ds.add_frame("observation.images.cam", camera_image)
+
+ds.save_episode()    # 落盘全部 buffer，校验对齐/视频帧数，重置计数器
+```
+
 ### 读取
 
 ```python
-# 基本读取
-ds = MultiFrequencyLeRobotDataset(repo_id="robot", root="data/")
-item = ds[10]
-
-# 带配置的读取
 ds = MultiFrequencyLeRobotDataset(
     repo_id="robot", root="data/",
     episodes=[0, 2],                                    # 只加载 episode 0, 2
@@ -438,7 +434,20 @@ ds = MultiFrequencyLeRobotDataset(
     window_overrides={"observation.imu": (-0.066, 0)},   # 覆盖 window
     video_backend="pyav",
 )
+item = ds[10]
 ```
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `repo_id` | `str` | — | 数据集名称 |
+| `root` | `str \| Path` | `~/.cache/huggingface/lerobot/<repo_id>` | 存储根目录 |
+| `episodes` | `list[int]` | `None` | 只加载指定的 episode 编号 |
+| `image_transforms` | callable | `None` | 图像变换（torchvision transforms 风格） |
+| `delta_timestamps` | `dict[str, list[float]]` | `None` | 多帧查询：返回 `{key: 主帧与各偏移帧}`，如 `{"observation.state": [-0.1, 0, 0.1]}` |
+| `tolerance_s` | `float` | `1e-4` | `delta_timestamps` 的帧对齐容差 |
+| `video_backend` | `str` | `None` | 视频解码后端（如 `"pyav"`） |
+| `batch_encoding_size` | `int` | `1` | （写入侧）视频批量编码大小 |
+| `window_overrides` | `dict` | `None` | 读取时覆盖各 feature 的 window，如 `{"observation.imu": (-0.066, 0)}` |
 
 ### 读取返回结构
 
@@ -470,24 +479,21 @@ item = ds[10]
 ```mermaid
 flowchart TB
     subgraph Entry["入口层"]
-        AF["add_frame(key, value)"]
-        GI["__getitem__(idx)"]
-        SE["save_episode()"]
+        DS["MultiFrequencyLeRobotDataset<br/>dataset.py · 编排器<br/>(继承 LeRobotDataset)"]
     end
 
     subgraph Core["核心层"]
-        DS["MultiFrequencyLeRobotDataset<br/>(LeRobotDataset)"]
-        IX["MasterIndex"]
-        MD["MultiFrequencyDatasetMetadata<br/>(LeRobotDatasetMetadata)"]
+        IX["MasterIndex<br/>index.py"]
+        MD["MultiFrequencyDatasetMetadata<br/>metadata.py"]
     end
 
     subgraph Features["特征层"]
-        PF["ParquetFeature<br/>buffer → parquet → query"]
-        VF["VideoFeature<br/>PNG → MP4 → decode"]
+        PF["ParquetFeature<br/>parquet.py"]
+        VF["VideoFeature<br/>video.py"]
     end
 
     subgraph Validate["校验层"]
-        CK["DatasetChecker<br/>video frames + alignment"]
+        CK["DatasetChecker<br/>checker.py"]
     end
 
     subgraph Store["存储层"]
@@ -496,30 +502,24 @@ flowchart TB
         META[("元数据<br/>meta/")]
     end
 
-    AF --> DS
-    GI --> DS
-    SE --> DS
-    DS --> IX
-    DS --> MD
-    DS --> PF
-    DS --> VF
-    DS --> CK
-    PF --> PQ
-    VF --> MP4
-    VF --> PQ
-    IX --> PQ
-    MD --> META
-    CK --> META
+    DS -->|"帧索引读写"| IX
+    DS -->|"info.json / 元数据"| MD
+    DS -->|"读数写入 / 窗口查询"| PF
+    DS -->|"图像写入 / 视频解码"| VF
+    DS -->|"落盘后校验"| CK
+    PF -->|"保存 / 读取"| PQ
+    VF -->|"编码 MP4"| MP4
+    VF -->|"时间戳表"| PQ
+    IX -->|"保存"| PQ
+    MD -->|"保存"| META
+    CK -->|"校验报告"| META
 
     style DS fill:#e8eaf6,stroke:#4fc3f7,stroke-width:2px,color:#000
+    style IX fill:#ffebee,stroke:#ef9a9a,color:#000
+    style MD fill:#fafafa,stroke:#9e9e9e,color:#000
     style PF fill:#e8f5e9,stroke:#66bb6a,color:#000
     style VF fill:#f3e5f5,stroke:#ce93d8,color:#000
-    style IX fill:#ffebee,stroke:#ef9a9a,color:#000
     style CK fill:#fff3e0,stroke:#ffcc80,color:#000
-    style AF fill:#fafafa,stroke:#9e9e9e,color:#000
-    style GI fill:#fafafa,stroke:#9e9e9e,color:#000
-    style SE fill:#fafafa,stroke:#9e9e9e,color:#000
-    style MD fill:#fafafa,stroke:#9e9e9e,color:#000
     style PQ fill:#fafafa,stroke:#9e9e9e,color:#000
     style MP4 fill:#fafafa,stroke:#9e9e9e,color:#000
     style META fill:#fafafa,stroke:#9e9e9e,color:#000
@@ -595,6 +595,10 @@ Demo 包含的传感器：
 | action | 7 (速度指令) | 30 Hz | — (nearest) |
 
 三个 2 秒 episode：`reach_target`、`pour_liquid`、`stack_blocks`。
+
+**可视化效果**（`python -m scripts.visualize --episode 0`）：
+
+![可视化效果截图](examples/visualize.png)
 
 ### 可视化操作
 
