@@ -9,26 +9,27 @@
 - [Multi-Frequency LeRobot Dataset](#multi-frequency-lerobot-dataset)
   - [目录](#目录)
   - [1. 动机：为什么需要多频率支持](#1-动机为什么需要多频率支持)
-  - [2. 快速开始](#2-快速开始)
-  - [3. 核心概念](#3-核心概念)
-    - [3.1 每特征独立存储](#31-每特征独立存储)
-    - [3.2 Window 参数](#32-window-参数)
-    - [3.3 Task 即主时钟](#33-task-即主时钟)
-    - [3.4 时间戳自动生成](#34-时间戳自动生成)
-    - [3.5 对齐校验](#35-对齐校验)
-    - [3.6 视频帧校验](#36-视频帧校验)
-  - [4. API 参考](#4-api-参考)
+  - [2. 安装](#2-安装)
+  - [3. 快速开始](#3-快速开始)
+  - [4. 核心概念](#4-核心概念)
+    - [4.1 每特征独立存储](#41-每特征独立存储)
+    - [4.2 Window 参数](#42-window-参数)
+    - [4.3 Task 即主时钟](#43-task-即主时钟)
+    - [4.4 时间戳自动生成](#44-时间戳自动生成)
+    - [4.5 对齐校验](#45-对齐校验)
+    - [4.6 视频帧校验](#46-视频帧校验)
+  - [5. API 参考](#5-api-参考)
     - [创建数据集](#创建数据集)
     - [Feature 定义格式](#feature-定义格式)
     - [写入](#写入)
     - [读取](#读取)
     - [读取返回结构](#读取返回结构)
-  - [5. 架构设计](#5-架构设计)
-  - [6. 与原生 LeRobotDataset 对比](#6-与原生-lerobotdataset-对比)
-  - [7. Demo 与可视化](#7-demo-与可视化)
+  - [6. 架构设计](#6-架构设计)
+  - [7. 与原生 LeRobotDataset 对比](#7-与原生-lerobotdataset-对比)
+  - [8. Demo 与可视化](#8-demo-与可视化)
     - [运行 Demo](#运行-demo)
     - [可视化操作](#可视化操作)
-  - [8. 安装](#8-安装)
+  - [9. 致谢](#9-致谢)
 
 ---
 
@@ -85,7 +86,29 @@ flowchart LR
 - `imu` → `(-0.033, 0]` 窗口内 33 个读数 → `[33, 6]`
 - `head_rgb` → 视频解码最近的帧 → `[3, 480, 640]`
 
-## 2. 快速开始
+## 2. 安装
+
+```bash
+git clone <repo-url>
+cd <repo>
+pip install -e .
+
+# 依赖
+pip install -r requirements.txt
+```
+
+依赖说明：
+
+| 依赖 | 用途 |
+|------|------|
+| `lerobot` | 基础数据集框架（继承 LeRobotDataset） |
+| `pyarrow` | parquet 文件读写 |
+| `numpy` / `torch` | 数据处理 |
+| `pyav` | 视频编码/解码 |
+| `matplotlib` | 可视化（可选） |
+| `h5py` | HDF5 数据读取（可选） |
+
+## 3. 快速开始
 
 ```python
 import numpy as np
@@ -179,9 +202,9 @@ sequenceDiagram
     DS->>DS: _check_episode_alignment()
 ```
 
-## 3. 核心概念
+## 4. 核心概念
 
-### 3.1 每特征独立存储
+### 4.1 每特征独立存储
 
 ```mermaid
 graph TB
@@ -219,7 +242,7 @@ timestamp (float64) | episode_index (int64) | col_0 (float32) | ... | col_D (flo
 - 高频特征（imu, eeg）：帧间多次采样，行数 = 频率 × 时长
 - 相机特征：timestamp parquet + MP4 视频
 
-### 3.2 Window 参数
+### 4.2 Window 参数
 
 每个 feature 可定义 `window`，控制查询时如何聚合数据：
 
@@ -263,7 +286,7 @@ gantt
     最近邻 (t=0.300)       : milestone, 0.300, 0s
 ```
 
-### 3.3 Task 即主时钟
+### 4.3 Task 即主时钟
 
 `add_frame("task", "reach_target")` 定义帧边界。task 的时间戳自动根据 FPS 生成（或手动传入），所有 feature 以此时戳为对齐基准。**无需指定 master_feature**——task 就是主时钟。
 
@@ -276,7 +299,7 @@ ds.add_frame("observation.state", ...) # 相机帧率传感器
 ds.add_frame("observation.images.cam", image)
 ```
 
-### 3.4 时间戳自动生成
+### 4.4 时间戳自动生成
 
 每个 feature 声明自己的 `fps`，dataset 内部维护计数器，`add_frame` 时自动生成时间戳：
 
@@ -287,7 +310,7 @@ ts = timestamp_start + counter × (1 / fps)
 - `timestamp_start`：可选偏移量，如 IMU 从 0.1s 开始记录
 - 计数器在 `save_episode()` 后归零
 
-### 3.5 对齐校验
+### 4.5 对齐校验
 
 `save_episode()` 后自动对每个定义了 `tolerance_s` 的 feature 进行校验：
 
@@ -302,7 +325,7 @@ ts = timestamp_start + counter × (1 / fps)
   frame 2 (t=0.0667) nearest at t=0.1000, diff=0.0333s
 ```
 
-### 3.6 视频帧校验
+### 4.6 视频帧校验
 
 每个 camera encode 后，用 pyav 打开 MP4，校验帧数与 episode 长度一致：
 
@@ -310,7 +333,7 @@ ts = timestamp_start + counter × (1 / fps)
 [VIDEO] episode 0, 'observation.images.head_rgb': OK (60f, 30.0fps, duration 2.00s)
 ```
 
-## 4. API 参考
+## 5. API 参考
 
 ### 创建数据集
 
@@ -398,7 +421,7 @@ item = ds[10]
 # }
 ```
 
-## 5. 架构设计
+## 6. 架构设计
 
 ```mermaid
 flowchart TB
@@ -474,7 +497,7 @@ src/mf_lerobot/
 
 4. **继承而非重写**：继承 `LeRobotDataset` 获取 `start_image_writer`、`_save_image` 等基础能力，只覆写核心的 4 个方法。
 
-## 6. 与原生 LeRobotDataset 对比
+## 7. 与原生 LeRobotDataset 对比
 
 | 特性 | 原生 LeRobotDataset | mf_lerobot |
 |------|-------------------|------------|
@@ -490,7 +513,7 @@ src/mf_lerobot/
 | 对齐校验 | 无 | 自动检查 `alignment_check.jsonl` |
 | 视频校验 | 无 | 自动检查帧数/时长 |
 
-## 7. Demo 与可视化
+## 8. Demo 与可视化
 
 ### 运行 Demo
 
@@ -532,13 +555,19 @@ w s      — 扩大/缩小窗口
 q / Esc  — 退出
 ```
 
-## 8. 安装
 
-```bash
-git clone <repo-url>
-cd <repo>
-pip install -e .
+## 9. 致谢
 
-# 依赖
-pip install -r requirements.txt
-```
+本项目基于以下开源项目与工作：
+
+- **[LeRobot](https://github.com/huggingface/lerobot)** — 基础数据集框架。本项目继承 `LeRobotDataset` 与 `LeRobotDatasetMetadata` 的 API 设计，复用了其视频编码、图像写入等基础设施。感谢 Hugging Face 团队对机器人学习开源生态的贡献。
+
+- **[PyArrow](https://arrow.apache.org/docs/python/)** — 高性能列式存储，per-feature parquet 文件的读写基础。
+
+- **[PyAV](https://pyav.org/)** — FFmpeg 的 Python 绑定，负责视频编码（AV1）与解码。
+
+- **[Matplotlib](https://matplotlib.org/)** — 可视化工具。
+
+- **[Allen Institute for Neural Dynamics](https://alleninstitute.org/division/neural-dynamics/)** 的 [Neuropixels](https://www.neuropixels.org/) 数据格式与 BIDS 标准 — 多模态神经数据组织方式的灵感来源。
+
+感谢所有反馈与讨论的同事。
