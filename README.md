@@ -124,8 +124,8 @@ The result of `ds[10]` (t=0.333s):
 ## 2. Installation
 
 ```bash
-git clone <repo-url>
-cd <repo>
+git clone https://github.com/Koorye/Multi-Frequency-LeRobot
+cd Multi-Frequency-LeRobot
 pip install -e .
 
 # dependencies

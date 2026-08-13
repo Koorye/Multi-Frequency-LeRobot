@@ -124,8 +124,8 @@ flowchart TD
 ## 2. 安装
 
 ```bash
-git clone <repo-url>
-cd <repo>
+git clone https://github.com/Koorye/Multi-Frequency-LeRobot
+cd Multi-Frequency-LeRobot
 pip install -e .
 
 # 依赖
