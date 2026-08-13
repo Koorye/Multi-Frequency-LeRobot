@@ -92,13 +92,13 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    IDX["ds[10]"] -->|"① 查第 10 帧"| MI[("master_index.parquet<br/>timestamp | task | frame_index")]
+    IDX["ds[10]"] -->|"① 查第 10 帧"| MI[("master_index.parquet timestamp | task | frame_index")]
     MI -->|"② 取出时间戳"| TS["t = 0.333s"]
-    TS -->|"③ nearest<br/>找时间最近的行"| P3[("state.parquet<br/>30Hz × 7d")]
-    TS -->|"③ window=(-0.033, 0]<br/>区间内全部行"| P1[("imu.parquet<br/>1000Hz × 6d")]
-    TS -->|"③ window=(-0.033, 0]<br/>区间内全部行"| P2[("eeg.parquet<br/>256Hz × 8d")]
-    TS -->|"③ nearest<br/>找时间最近的行"| C1[("head_rgb.parquet<br/>timestamps only")]
-    C1 -->|"④ 得到 frame_index"| V1[("head_rgb.mp4<br/>30fps video")]
+    TS -->|"③ nearest<br/>找时间最近的行"| P3[("state.parquet 30Hz × 7d")]
+    TS -->|"③ window=(-0.033, 0] 区间内全部行"| P1[("imu.parquet 1000Hz × 6d")]
+    TS -->|"③ window=(-0.033, 0] 区间内全部行"| P2[("eeg.parquet 256Hz × 8d")]
+    TS -->|"③ nearest 找时间最近的行"| C1[("head_rgb.parquet timestamps only")]
+    C1 -->|"④ 得到 frame_index"| V1[("head_rgb.mp4 30fps video")]
     P3 -->|"1 行"| RS["state → [7]"]
     P1 -->|"33 行"| RI["imu → [33, 6]"]
     P2 -->|"8 行"| RE["eeg → [8, 8]"]
