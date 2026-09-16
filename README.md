@@ -271,7 +271,12 @@ python -m examples.01read_simple
 
 # interactive visualizer
 python -m scripts.visualize --episode 0
+
+# web visualizer (browser UI, draggable time window)
+python scripts/visualize_web.py [DATASET_ROOT]
 ```
+
+The web visualizer supports optional zero-phase filtering of EEG/EMG strips: open the 滤波 panel on a strip and combine a high-pass / low-pass Butterworth with a comb notch at the line frequency and all its harmonics (EEG/EMG presets included). The API takes the same spec per feature: `/api/frame?...&filt=observation.eeg:hp=0.5,lp=40,notch=50`.
 
 ### 4.2 Demo 1: Writing (01write_simple.py)
 

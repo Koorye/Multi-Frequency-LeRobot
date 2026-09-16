@@ -1,0 +1,1083 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mf_lerobot visualizer</title>
+<style>
+:root {
+  --bg: #0d1117; --panel: #161b22; --border: #2d333b;
+  --text: #d7dde5; --dim: #8b949e; --accent: #58a6ff; --warn: #f0883e;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 13px/1.45 "SF Mono", Menlo, Consolas, "Noto Sans Mono CJK SC", monospace;
+}
+header {
+  position: sticky; top: 0; z-index: 20; background: var(--panel);
+  border-bottom: 1px solid var(--border); padding: 8px 14px;
+  display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center;
+}
+header .title { color: var(--accent); font-weight: bold; font-size: 14px; }
+header .group { display: flex; align-items: center; gap: 6px; }
+header label { color: var(--dim); }
+header select, header input[type=number] {
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 4px; padding: 2px 6px; font: inherit;
+}
+button {
+  background: #21262d; color: var(--text); border: 1px solid var(--border);
+  border-radius: 4px; padding: 3px 9px; font: inherit; cursor: pointer;
+}
+button:hover { border-color: var(--accent); }
+button.active { background: var(--accent); color: #04121f; border-color: var(--accent); }
+#task-badge {
+  background: #1f3a2d; color: #7ee787; border: 1px solid #2ea043;
+  border-radius: 4px; padding: 2px 8px; font-weight: bold;
+}
+#status { color: #f85149; }
+main { padding: 12px 14px 40px; display: flex; flex-direction: column; gap: 12px; }
+section h2 {
+  font-size: 12px; color: var(--dim); margin: 2px 0 8px;
+  text-transform: uppercase; letter-spacing: 1px;
+}
+#cameras { display: flex; flex-wrap: wrap; gap: 10px; }
+.cam {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px; cursor: zoom-in;
+}
+.cam canvas { display: block; border-radius: 4px; background: #000; }
+.cam .cap { color: var(--dim); font-size: 11px; padding-top: 3px; }
+.strip {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 8px 8px;
+}
+.strip-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.strip-head .key { color: var(--accent); font-weight: bold; }
+.strip-head .meta { color: var(--dim); font-size: 11px; }
+.strip-head .spacer { flex: 1; }
+.chan-panel {
+  margin-top: 6px; padding: 6px; border: 1px solid var(--border); border-radius: 4px;
+  background: var(--bg); max-height: 150px; overflow-y: auto;
+}
+.chan-panel .presets { margin-bottom: 6px; display: flex; gap: 4px; flex-wrap: wrap; }
+.chan-panel .presets button { padding: 1px 7px; font-size: 11px; }
+.chan-grid { display: flex; flex-wrap: wrap; gap: 1px 8px; }
+.chan-grid label { font-size: 11px; color: var(--dim); cursor: pointer; white-space: nowrap; }
+.chan-grid input { vertical-align: -2px; }
+.filt-panel {
+  margin-top: 6px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px;
+  background: var(--bg); display: flex; align-items: center; gap: 4px 14px; flex-wrap: wrap;
+}
+.filt-panel[hidden] { display: none; }
+.filt-panel label { font-size: 11px; color: var(--dim); }
+.filt-panel input[type=number] {
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 4px; padding: 1px 4px; font: inherit; width: 64px;
+}
+.filt-panel select {
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 4px; padding: 1px 4px; font: inherit;
+}
+.filt-panel .presets { display: flex; gap: 4px; }
+.filt-panel .presets button { padding: 1px 7px; font-size: 11px; }
+.filt-badge { color: var(--warn); }
+.plot-wrap { position: relative; margin-top: 4px; }
+.plot-wrap canvas { display: block; width: 100%; border-radius: 4px; }
+.tooltip {
+  position: fixed; z-index: 50; pointer-events: none; display: none;
+  background: rgba(22, 27, 34, 0.96); border: 1px solid var(--border);
+  border-radius: 4px; padding: 5px 8px; font-size: 11px; max-width: 320px;
+  max-height: 60vh; overflow: hidden;
+}
+.tooltip .tt-head { color: var(--accent); }
+.tooltip .tt-row { white-space: nowrap; }
+#modal {
+  position: fixed; inset: 0; z-index: 40; background: rgba(0,0,0,0.85);
+  display: none; align-items: center; justify-content: center; cursor: zoom-out;
+}
+#modal img { max-width: 96vw; max-height: 96vh; border-radius: 4px; }
+#modal .cap { position: fixed; bottom: 8px; color: var(--dim); }
+input[type=range] { vertical-align: middle; }
+</style>
+</head>
+<body>
+<header>
+  <span class="title">🧠 mf_lerobot visualizer</span>
+  <span id="ds-name" style="color:var(--dim)"></span>
+  <span class="group">
+    <label>episode</label>
+    <select id="ep-select"></select>
+  </span>
+  <span class="group">
+    <label>frame</label>
+    <input type="number" id="frame-num" min="0" style="width:76px">
+    <span id="frame-of" class="dim" style="color:var(--dim)"></span>
+  </span>
+  <input type="range" id="frame-slider" style="width:220px">
+  <span class="group">
+    <button id="play-btn" title="空格">▶ 播放</button>
+    <label>速度</label>
+    <select id="speed-select">
+      <option value="0.25">0.25×</option><option value="0.5">0.5×</option>
+      <option value="1" selected>1×</option><option value="2">2×</option>
+    </select>
+    <button id="loop-btn" title="循环">🔁 循环</button>
+  </span>
+  <span class="group">
+    <label>窗口</label>
+    <input type="number" id="w0-input" step="5" style="width:64px"> →
+    <input type="number" id="w1-input" step="5" style="width:64px"> ms
+  </span>
+  <span class="group" id="presets">
+    <button data-w="-33,0">±33</button>
+    <button data-w="-100,0">-100</button>
+    <button data-w="-250,0">-250</button>
+    <button data-w="-500,0">-500</button>
+    <button data-w="-1000,0">-1000</button>
+    <button data-w="-500,500">±500</button>
+    <button data-w="full" title="显示完整 episode（随帧移动）">全段</button>
+    <button data-w="0,0">最近</button>
+  </span>
+  <span id="task-badge">—</span>
+  <span id="status"></span>
+</header>
+<main>
+  <section id="cameras-section">
+    <h2>📷 相机 (点击放大)</h2>
+    <div id="cameras"></div>
+  </section>
+  <section id="strips-section">
+    <h2>📈 传感器 (拖拽橙色窗口边缘调整时间窗)</h2>
+    <div id="strips"></div>
+  </section>
+</main>
+<div class="tooltip" id="tooltip"></div>
+<div id="modal"><img id="modal-img" alt=""><span class="cap"></span></div>
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const color = i => `hsl(${(i * 137.508) % 360}, 62%, 60%)`;
+
+const state = {
+  meta: null, ep: 0, frame: 0, playing: false, speed: 1, loop: false,
+  w0: -0.033, w1: 0,                    // seconds, relative to current frame
+  full: false,                          // "全段" mode: window spans the episode
+  visible: {},                          // key -> null(all) | Set(indices)
+  bands: {},                            // key -> bool
+  filters: {},                          // key -> {hp,lp,notch,line} (eeg/emg only)
+  stats: {},                            // ep -> {key: {min,max,mean,std}}
+  camsOn: {},                           // key -> bool (camera fetch enabled)
+  indY: {},                             // key -> bool (per-channel y scale)
+  data: null, refreshSeq: 0, timer: null, dragging: null,
+  refreshing: false, refreshQueued: false, lastCamFrame: -1,
+};
+
+async function api(path) {
+  const res = await fetch(path);
+  return res.json();
+}
+
+// ── init ────────────────────────────────────────────────────────────────
+
+async function init() {
+  const meta = await api("/api/dataset");
+  if (meta.error) { $("#status").textContent = meta.error; return; }
+  if (!meta.episodes || !meta.episodes.length) {
+    $("#status").textContent = "数据集没有 episode";
+    return;
+  }
+  state.meta = meta;
+  $("#ds-name").textContent = `${meta.name} · ${meta.fps} fps`;
+  buildEpisodes(meta);
+  buildCameras(meta);
+  buildStrips(meta);
+  bindControls();
+  selectEpisode(0);
+}
+
+function buildEpisodes(meta) {
+  const sel = $("#ep-select");
+  sel.innerHTML = "";
+  meta.episodes.forEach((e, i) => {
+    const opt = document.createElement("option");
+    opt.value = i;
+    opt.textContent = `#${i} · ${e.length}f · ${(e.tasks || []).join("+") || "—"}`;
+    sel.appendChild(opt);
+  });
+}
+
+function buildCameras(meta) {
+  const box = $("#cameras");
+  box.innerHTML = "";
+  const cams = meta.features.filter(f => f.kind === "video");
+  $("#cameras-section").style.display = cams.length ? "" : "none";
+  for (const f of cams) {
+    const card = document.createElement("div");
+    card.className = "cam";
+    card.dataset.key = cssKey(f.key);
+    card.innerHTML = `<canvas width="${canvasThumbW(f)}" height="${canvasThumbH(f)}"></canvas>
+      <div class="cap"><label><input type="checkbox" class="cam-toggle" checked> 显示</label>
+      <span class="cap-key">${f.key}</span></div>`;
+    state.camsOn[f.key] = true;
+    card.querySelector(".cam-toggle").addEventListener("click", e => {
+      e.stopPropagation();
+      state.camsOn[f.key] = e.target.checked;
+      if (e.target.checked) loadCameras(state.refreshSeq);
+    });
+    card.addEventListener("click", () => openModal(f.key));
+    box.appendChild(card);
+  }
+}
+function canvasThumbW(f) { const [h, w] = f.shape; return Math.round(300 * w / h); }
+function canvasThumbH(f) { return 200; }
+
+function buildStrips(meta) {
+  const box = $("#strips");
+  box.innerHTML = "";
+  const feats = meta.features.filter(f => f.kind === "parquet");
+  for (const f of feats) {
+    const n = f.names.length;
+    const bio = isBio(f.key);
+    state.visible[f.key] = null;      // all visible
+    state.bands[f.key] = true;        // episode-stats scale (stable montage lanes)
+    state.indY[f.key] = true;         // independent per-channel y scale
+    if (bio) state.filters[f.key] = { hp: 0, lp: 0, notch: false, line: 50 };
+
+    const el = document.createElement("div");
+    el.className = "strip";
+    el.dataset.key = cssKey(f.key);
+    const h = Math.max(110, Math.min(260, 70 + n * 1.9));
+    el.innerHTML = `
+      <div class="strip-head">
+        <span class="key">${f.key}</span>
+        <span class="meta">${isMarker(f.key) ? "事件" : n + " 通道"} · ${fmtRate(f.fps)} Hz</span>
+        <span class="meta count" id="count-${cssKey(f.key)}">—</span>
+        <span class="meta filt-badge"></span>
+        <span class="spacer"></span>
+        <button class="btn-indy active" title="每通道独立 y 量程（montage）">独立Y轴</button>
+        <button class="btn-band active" title="用 episode 统计 min/max 作为量程；关闭则用窗口内数据">参考带</button>
+        ${bio ? `<button class="btn-filt" title="高通 / 低通 / 工频梳状陷波（零相位滤波）">滤波</button>` : ""}
+        <button class="btn-chan">通道</button>
+        <button class="btn-fold">−</button>
+      </div>
+      <div class="chan-panel" hidden></div>
+      <div class="filt-panel" hidden></div>
+      <div class="plot-wrap"><canvas class="plot" style="height:${h}px"></canvas></div>`;
+
+    const panel = el.querySelector(".chan-panel");
+    buildChanPanel(f, panel);
+    const fpanel = el.querySelector(".filt-panel");
+    if (bio) {
+      buildFiltPanel(f, fpanel);
+      el.querySelector(".btn-filt").addEventListener("click", () => {
+        fpanel.hidden = !fpanel.hidden;
+      });
+    }
+    el.querySelector(".btn-chan").addEventListener("click", () => {
+      panel.hidden = !panel.hidden;
+    });
+    el.querySelector(".btn-band").addEventListener("click", ev => {
+      state.bands[f.key] = !state.bands[f.key];
+      ev.target.classList.toggle("active", state.bands[f.key]);
+      requestRender();
+    });
+    el.querySelector(".btn-indy").addEventListener("click", ev => {
+      state.indY[f.key] = !state.indY[f.key];
+      ev.target.classList.toggle("active", state.indY[f.key]);
+      requestRender();
+    });
+    el.querySelector(".btn-fold").addEventListener("click", ev => {
+      const wrap = el.querySelector(".plot-wrap"), p = el.querySelector(".chan-panel");
+      const hidden = wrap.style.display === "none";
+      wrap.style.display = hidden ? "" : "none";
+      p.hidden = true;
+      ev.target.textContent = hidden ? "−" : "+";
+      if (!hidden) requestRender();
+    });
+
+    const canvas = el.querySelector(".plot");
+    canvas.addEventListener("mousedown", e => onPlotMouseDown(e, canvas, f));
+    canvas.addEventListener("mousemove", e => onPlotMouseMove(e, canvas, f));
+    canvas.addEventListener("mouseleave", () => $("#tooltip").style.display = "none");
+    box.appendChild(el);
+  }
+}
+
+function buildChanPanel(f, panel) {
+  const n = f.names.length;
+  let html = "";
+  if (n > 4) {
+    html += `<div class="presets">
+      <button data-act="all">全部</button><button data-act="none">无</button>`;
+    if (f.key.includes("eeg"))
+      html += `<button data-act="region" data-r="F">F</button>
+               <button data-act="region" data-r="C">C</button>
+               <button data-act="region" data-r="P">P</button>
+               <button data-act="region" data-r="O">O</button>
+               <button data-act="region" data-r="T">T</button>`;
+    html += `</div>`;
+  }
+  html += `<div class="chan-grid">`;
+  f.names.forEach((nm, i) => {
+    html += `<label><input type="checkbox" data-i="${i}" checked>
+      <span style="color:${color(i)}">▮</span> ${nm}</label>`;
+  });
+  html += `</div>`;
+  panel.innerHTML = html;
+
+  panel.querySelectorAll(".chan-grid input").forEach(cb => {
+    cb.addEventListener("change", () => setChannelVisible(f, parseInt(cb.dataset.i), cb.checked));
+  });
+  panel.querySelectorAll(".presets button").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const act = btn.dataset.act;
+      const boxes = [...panel.querySelectorAll(".chan-grid input")];
+      if (act === "all") boxes.forEach(cb => { cb.checked = true; });
+      if (act === "none") boxes.forEach(cb => { cb.checked = false; });
+      if (act === "region") {
+        const r = btn.dataset.r;
+        boxes.forEach(cb => {
+          cb.checked = f.names[parseInt(cb.dataset.i)].startsWith(r);
+        });
+      }
+      const set = new Set(boxes.filter(cb => cb.checked).map(cb => parseInt(cb.dataset.i)));
+      state.visible[f.key] = set.size === n ? null : set;
+      requestRender();
+      scheduleRefresh();
+    });
+  });
+}
+
+function setChannelVisible(f, i, checked) {
+  const n = f.names.length;
+  let set = state.visible[f.key];
+  if (set === null) set = new Set(f.names.map((_, k) => k));
+  checked ? set.add(i) : set.delete(i);
+  state.visible[f.key] = set.size === n ? null : set;
+  requestRender();
+  scheduleRefresh();
+}
+
+// ── bio-signal filtering (eeg/emg) ──────────────────────────────────────
+
+function isBio(key) { return /eeg|emg/i.test(key); }
+// sparse event channels (e.g. observation.marker): draw as dots, not lines
+function isMarker(key) { return /marker/i.test(key); }
+const fmtCode = v => Number.isInteger(v) ? String(v) : fmtVal(v);
+const FILT_PRESETS = {
+  raw: { hp: 0, lp: 0, notch: false },
+  eeg: { hp: 0.5, lp: 40, notch: true },   // 常规脑电带宽 + 工频陷波
+  emg: { hp: 20, lp: 450, notch: true },   // 常规肌电带宽 + 工频陷波
+};
+
+function buildFiltPanel(f, panel) {
+  panel.innerHTML = `
+    <label>高通 <input type="number" class="f-hp" min="0" step="any" placeholder="关"> Hz</label>
+    <label>低通 <input type="number" class="f-lp" min="0" step="any" placeholder="关"> Hz</label>
+    <label><input type="checkbox" class="f-notch"> 梳状陷波</label>
+    <select class="f-line" title="工频基频（陷波 50/60 Hz 及其全部谐波）">
+      <option value="50">50 Hz</option><option value="60">60 Hz</option>
+    </select>
+    <span class="presets">
+      <button data-f="raw" title="不做滤波">原始</button>
+      <button data-f="eeg" title="HP 0.5 / LP 40 / 陷波">EEG</button>
+      <button data-f="emg" title="HP 20 / LP 450 / 陷波">EMG</button>
+    </span>
+    <span class="meta" style="color:var(--dim);font-size:11px">零相位 (filtfilt)，按整段 episode 滤波；首尾/断点附近为滤波器稳定区，置灰不显示</span>`;
+
+  const flt = state.filters[f.key];
+  const inp = sel => panel.querySelector(sel);
+  const apply = () => { updateFiltUi(f); scheduleRefresh(); };
+  inp(".f-hp").addEventListener("input", e => {
+    flt.hp = Math.max(0, parseFloat(e.target.value) || 0);
+    apply();
+  });
+  inp(".f-lp").addEventListener("input", e => {
+    flt.lp = Math.max(0, parseFloat(e.target.value) || 0);
+    apply();
+  });
+  inp(".f-notch").addEventListener("change", e => { flt.notch = e.target.checked; apply(); });
+  inp(".f-line").addEventListener("change", e => {
+    flt.line = parseFloat(e.target.value);
+    if (flt.notch) apply();
+  });
+  panel.querySelectorAll(".presets button").forEach(btn => {
+    btn.addEventListener("click", () => {
+      Object.assign(flt, FILT_PRESETS[btn.dataset.f]);
+      syncFiltInputs(f, panel);
+      apply();
+    });
+  });
+}
+
+function syncFiltInputs(f, panel) {
+  const flt = state.filters[f.key];
+  panel.querySelector(".f-hp").value = flt.hp > 0 ? flt.hp : "";
+  panel.querySelector(".f-lp").value = flt.lp > 0 ? flt.lp : "";
+  panel.querySelector(".f-notch").checked = flt.notch;
+  panel.querySelector(".f-line").value = String(flt.line);
+}
+
+function updateFiltUi(f) {
+  const el = document.querySelector(`.strip[data-key="${cssKey(f.key)}"]`);
+  if (!el) return;
+  const flt = state.filters[f.key];
+  const parts = [];
+  if (flt.hp > 0) parts.push("HP" + flt.hp);
+  if (flt.lp > 0) parts.push("LP" + flt.lp);
+  if (flt.notch) parts.push("陷波" + flt.line);
+  el.querySelector(".filt-badge").textContent = parts.join(" · ");
+  el.querySelector(".btn-filt").classList.toggle("active", parts.length > 0);
+}
+
+function filtQuery() {
+  // "key:hp=..,lp=..,notch=.." parts for every bio strip with a filter on
+  const out = [];
+  for (const f of state.meta.features) {
+    if (f.kind !== "parquet") continue;
+    const flt = state.filters[f.key];
+    if (!flt) continue;
+    const parts = [];
+    if (flt.hp > 0) parts.push(`hp=${flt.hp}`);
+    if (flt.lp > 0) parts.push(`lp=${flt.lp}`);
+    if (flt.notch && flt.line > 0) parts.push(`notch=${flt.line}`);
+    if (parts.length) out.push(`${f.key}:${parts.join(",")}`);
+  }
+  return out.join(";");
+}
+
+// ── controls ────────────────────────────────────────────────────────────
+
+function bindControls() {
+  $("#frame-slider").addEventListener("input", e => {
+    state.frame = parseInt(e.target.value);
+    $("#frame-num").value = state.frame;
+    scheduleRefresh();
+  });
+  $("#frame-num").addEventListener("change", e => {
+    state.frame = clamp(parseInt(e.target.value) || 0, 0, epLength() - 1);
+    syncControls();
+    refresh();
+  });
+  $("#ep-select").addEventListener("change", e => selectEpisode(parseInt(e.target.value)));
+  $("#play-btn").addEventListener("click", togglePlay);
+  $("#loop-btn").addEventListener("click", () => {
+    state.loop = !state.loop;
+    $("#loop-btn").classList.toggle("active", state.loop);
+  });
+  $("#speed-select").addEventListener("change", e => {
+    state.speed = parseFloat(e.target.value);
+    if (state.playing) { togglePlay(); togglePlay(); }
+  });
+  $("#w0-input").addEventListener("change", e => {
+    state.full = false; syncPresetBtns();
+    state.w0 = parseInt(e.target.value) / 1000;
+    state.w1 = Math.max(state.w1, state.w0 + 0.005);
+    syncWindowInputs(); refresh();
+  });
+  $("#w1-input").addEventListener("change", e => {
+    state.full = false; syncPresetBtns();
+    state.w1 = parseInt(e.target.value) / 1000;
+    state.w0 = Math.min(state.w0, state.w1 - 0.005);
+    syncWindowInputs(); refresh();
+  });
+  document.querySelectorAll("#presets button").forEach(b => {
+    b.addEventListener("click", () => {
+      if (b.dataset.w === "full") {
+        state.full = true;                // window spans the episode, follows frame
+      } else {
+        state.full = false;
+        const [a, c] = b.dataset.w.split(",").map(Number);
+        state.w0 = a / 1000; state.w1 = c / 1000;
+        syncWindowInputs();
+      }
+      syncPresetBtns(); refresh();
+    });
+  });
+  window.addEventListener("keydown", onKey);
+  window.addEventListener("resize", () => requestRender());
+}
+
+function onKey(e) {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+  if (["ArrowRight", "ArrowLeft", "Home", "End"].includes(e.key)) e.preventDefault();
+  if (e.key === "ArrowRight") { state.frame = clamp(state.frame + 1, 0, epLength() - 1); syncControls(); refresh(); }
+  else if (e.key === "ArrowLeft") { state.frame = clamp(state.frame - 1, 0, epLength() - 1); syncControls(); refresh(); }
+  else if (e.key === " ") { e.preventDefault(); togglePlay(); }
+  else if (e.key === "Home") { state.frame = 0; syncControls(); refresh(); }
+  else if (e.key === "End") { state.frame = epLength() - 1; syncControls(); refresh(); }
+}
+
+function togglePlay() {
+  if (state.playing) {
+    clearInterval(state.timer); state.timer = null; state.playing = false;
+  } else {
+    state.playing = true;
+    const ms = 1000 / (state.meta.fps * state.speed);
+    state.timer = setInterval(() => {
+      if (state.refreshing) return;   // adapt to load: skip tick, don't pile up
+      if (state.frame + 1 >= epLength()) {
+        if (state.loop) { state.frame = 0; }
+        else { togglePlay(); return; }
+      } else {
+        state.frame++;
+      }
+      syncControls(); refresh();
+    }, ms);
+  }
+  $("#play-btn").textContent = state.playing ? "⏸ 暂停" : "▶ 播放";
+  $("#play-btn").classList.toggle("active", state.playing);
+}
+
+// ── data flow ───────────────────────────────────────────────────────────
+
+let refreshTimer = null;
+function scheduleRefresh() {
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(refresh, 90);
+}
+
+function epLength() { return state.meta.episodes[state.ep].length; }
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+async function selectEpisode(i) {
+  state.ep = i; state.frame = 0;
+  $("#ep-select").value = i;
+  syncControls();
+  if (!(i in state.stats)) {
+    const s = await api(`/api/stats?ep=${i}`);
+    if (!s.error) state.stats[i] = s;
+  }
+  refresh();
+}
+
+function syncControls() {
+  $("#frame-slider").max = epLength() - 1;
+  $("#frame-slider").value = state.frame;
+  $("#frame-num").value = state.frame;
+  $("#frame-of").textContent = `/ ${epLength()}`;
+}
+function syncWindowInputs() {
+  $("#w0-input").value = Math.round(state.w0 * 1000);
+  $("#w1-input").value = Math.round(state.w1 * 1000);
+}
+function syncPresetBtns() {
+  const fb = document.querySelector('#presets button[data-w="full"]');
+  if (fb) fb.classList.toggle("active", !!state.full);
+}
+
+async function refresh(forceVideo) {
+  if (state.refreshing) { state.refreshQueued = true; return; }
+  state.refreshing = true;
+  try {
+    const seq = ++state.refreshSeq;
+    if (state.full) {
+      // window covers the whole episode, anchored to the current frame
+      const fps = state.meta.fps || 30;
+      state.w0 = -(state.frame / fps) - 0.01;
+      state.w1 = (epLength() - state.frame) / fps + 0.01;
+      syncWindowInputs();
+    }
+    const cols = [];
+    for (const f of state.meta.features) {
+      if (f.kind !== "parquet") continue;
+      const vis = state.visible[f.key];
+      if (vis !== null && f.names.length > 32) cols.push(`${f.key}:${[...vis].join(",")}`);
+    }
+    const qs = new URLSearchParams({ ep: state.ep, f: state.frame, w0: state.w0, w1: state.w1 });
+    if (cols.length) qs.set("cols", cols.join(";"));
+    const filt = filtQuery();
+    if (filt) qs.set("filt", filt);
+    const data = await api(`/api/frame?${qs}`);
+    if (seq !== state.refreshSeq) return;
+    if (data.error) { $("#status").textContent = data.error; return; }
+    $("#status").textContent = "";
+    state.data = data;
+    renderInfo(data);
+    requestRender();
+    // Cameras only re-fetch when the FRAME changes — window drags must not
+    // hammer the video endpoints. During playback update at half rate.
+    const frameChanged = state.frame !== state.lastCamFrame;
+    if (frameChanged || forceVideo) {
+      const stride = state.playing ? (state.speed >= 1 ? 2 : 1) : 1;
+      if (!state.playing || state.frame % stride === 0 || forceVideo) {
+        loadCameras(seq);
+      }
+      state.lastCamFrame = state.frame;
+    }
+  } catch (err) {
+    $("#status").textContent = String(err);
+  } finally {
+    state.refreshing = false;
+    if (state.refreshQueued) { state.refreshQueued = false; refresh(); }
+  }
+}
+
+function renderInfo(data) {
+  $("#task-badge").textContent = data.task || "—";
+}
+
+function loadCameras(seq) {
+  for (const f of state.meta.features) {
+    if (f.kind !== "video") continue;
+    if (state.camsOn[f.key] === false) continue;
+    const card = document.querySelector(`.cam[data-key="${cssKey(f.key)}"]`);
+    if (!card) continue;
+    const cv = card.querySelector("canvas");
+    const w = f.shape[1];
+    const scale = 300 / w;
+    const url = `/api/video?ep=${state.ep}&f=${state.frame}&cam=${encodeURIComponent(f.key)}&scale=${scale.toFixed(3)}&q=75`;
+    fetch(url).then(r => r.blob()).then(blob => {
+      if (seq !== state.refreshSeq) return;
+      const blobUrl = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => {
+        URL.revokeObjectURL(blobUrl);
+        const dpr = window.devicePixelRatio || 1;
+        cv.width = img.width * dpr; cv.height = img.height * dpr;
+        cv.style.width = img.width + "px"; cv.style.height = img.height + "px";
+        const ctx = cv.getContext("2d");
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.drawImage(img, 0, 0);
+      };
+      img.onerror = () => URL.revokeObjectURL(blobUrl);
+      img.src = blobUrl;
+    }).catch(() => {});
+    const capKey = card.querySelector(".cap-key");
+    if (capKey) capKey.textContent =
+      `${f.key} · t=${state.data ? state.data.timestamp.toFixed(3) : ""}s`;
+  }
+}
+
+// ── strip rendering ─────────────────────────────────────────────────────
+
+let renderPending = false;
+function requestRender() {
+  // coalesce multiple redraw requests into one animation frame
+  if (renderPending) return;
+  renderPending = true;
+  requestAnimationFrame(() => { renderPending = false; renderStrips(); });
+}
+
+function renderStrips() {
+  for (const f of state.meta.features) {
+    if (f.kind !== "parquet") continue;
+    const el = document.querySelector(`.strip[data-key="${cssKey(f.key)}"]`);
+    if (!el) continue;
+    const cv = el.querySelector(".plot");
+    const samples = state.data ? state.data.samples[f.key] : null;
+    const vis = state.visible[f.key];
+    // episode stats describe the RAW signal — they would mis-scale a
+    // filtered one (e.g. drift removed), so drop the reference bands then
+    const filtered = !!(samples && samples.filter);
+    const bands = (!filtered && state.bands[f.key])
+      ? (state.stats[state.ep] || {})[f.key] : null;
+    drawPlot(cv, f, samples, vis, bands);
+    el.querySelector(".count").textContent = samples
+      ? `${samples.ts.length} 样本${filtered ? " · 滤波后" : ""}` : "无样本";
+  }
+}
+
+function drawPlot(cv, f, samples, vis, bands) {
+  const ctx = cv.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth || 800, H = cv.clientHeight || 140;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) {
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = "#0d1117"; ctx.fillRect(0, 0, W, H);
+
+  const [w0, w1] = [state.w0, state.w1];
+  const independent = state.indY[f.key] !== false;   // montage mode by default
+  const marker = isMarker(f.key);                    // event dots, no polyline
+
+  // which channels to draw: {pos: column in the response, orig: true channel index}
+  const lanes = samples
+    ? samples.names.map((nm, i) => ({
+        pos: i,
+        orig: samples.indices ? samples.indices[i] : i,
+      })).filter(l => vis === null || vis.has(l.orig))
+    : [];
+
+  // left gutter: channel names (montage) or numeric y labels (shared scale)
+  let padL = 46;
+  if (independent && samples && lanes.length) {
+    const maxLen = Math.max(...samples.names.map(n => n.length));
+    padL = Math.max(34, Math.min(110, 6.2 * maxLen));
+  }
+  const padR = 10, padT = 14, padB = 18;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const right = W - padR;
+  const x = t => padL + (t - w0) / (w1 - w0) * plotW;
+  const xIn = t => t >= w0 && t <= w1;
+
+  // x grid (shared in both modes)
+  ctx.strokeStyle = "#1c2229"; ctx.fillStyle = "#8b949e";
+  ctx.font = "10px monospace"; ctx.lineWidth = 1;
+  if (w1 - w0 > 1e-9) {
+    const nTicks = 6;
+    for (let i = 0; i <= nTicks; i++) {
+      const t = w0 + (w1 - w0) * i / nTicks;
+      const px = x(t);
+      ctx.beginPath(); ctx.moveTo(px, padT); ctx.lineTo(px, padT + plotH); ctx.stroke();
+      ctx.fillText((t * 1000).toFixed(0) + "ms", px + 2, H - 5);
+    }
+  }
+
+  if (independent && samples && lanes.length) {
+    drawMontage(ctx, samples, lanes, bands, x, xIn, padL, padT, right, plotH, marker);
+  } else {
+    drawSharedScale(ctx, f, samples, lanes, bands, x, xIn, padL, padT, right, plotH, marker);
+  }
+
+  // window edges (draggable handles) — on top of everything
+  if (w1 - w0 > 1e-9) {
+    for (const [wt, lab] of [[w0, "w0"], [w1, "w1"]]) {
+      const px = x(wt);
+      ctx.strokeStyle = "#f0883e"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(px, padT - 2); ctx.lineTo(px, padT + plotH); ctx.stroke();
+      ctx.fillStyle = "#f0883e";
+      ctx.fillRect(px - 4, padT - 2, 8, 8);
+      ctx.fillText(lab, px - 6, padT - 5);
+    }
+  }
+
+  // cursor at t = 0
+  if (xIn(0)) {
+    const px = x(0);
+    ctx.strokeStyle = "#f85149"; ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(px, padT); ctx.lineTo(px, padT + plotH); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#f85149";
+    ctx.fillText("t", px + 2, padT + 9);
+  }
+}
+
+// ── montage mode: shared x, one lane per channel with its own y scale ────
+
+function drawMontage(ctx, samples, lanes, bands, x, xIn, padL, padT, right, plotH, marker) {
+  const n = lanes.length;
+  const laneH = plotH / n;
+  ctx.lineWidth = 1;
+  for (let li = 0; li < n; li++) {
+    const lane = lanes[li];
+    const i = lane.pos, orig = lane.orig;
+    const laneTop = padT + li * laneH;
+    const laneBottom = padT + (li + 1) * laneH;
+
+    // per-channel scale range: episode stats (stable) or window data (dynamic)
+    const hasBand = bands && bands.min[orig] !== null && isFinite(bands.min[orig])
+      && bands.max[orig] !== null && isFinite(bands.max[orig]);
+    let lo = Infinity, hi = -Infinity;
+    if (hasBand) { lo = bands.min[orig]; hi = bands.max[orig]; }
+    else {
+      for (const row of samples.values) {
+        const v = row[i];
+        if (v === null || !isFinite(v)) continue;
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      }
+    }
+    if (!isFinite(lo)) { lo = -1; hi = 1; }
+    if (hi - lo < 1e-9) { hi = lo + 1; }
+    const pad = (hi - lo) * 0.05;
+    lo -= pad; hi += pad;
+    const y = v => laneBottom - (v - lo) / (hi - lo) * laneH;
+
+    // lane separator
+    ctx.strokeStyle = "#1c2229";
+    ctx.beginPath(); ctx.moveTo(padL, laneBottom); ctx.lineTo(right, laneBottom); ctx.stroke();
+
+    // channel name (only if the lane is tall enough to hold text)
+    if (laneH >= 9) {
+      ctx.fillStyle = color(orig);
+      ctx.font = "9px monospace";
+      ctx.fillText(samples.names[i].slice(0, 12), 2, laneBottom - 2);
+    }
+
+    // zero line (faint dashed)
+    if (lo < 0 && hi > 0) {
+      ctx.strokeStyle = "#30363d";
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath(); ctx.moveTo(padL, y(0)); ctx.lineTo(right, y(0)); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // curve, clipped to its own lane
+    ctx.save();
+    ctx.beginPath(); ctx.rect(padL, laneTop, right - padL, laneH); ctx.clip();
+    ctx.strokeStyle = color(orig);
+    if (marker) {
+      // event channel: discrete dots (no connecting line), code labels when sparse
+      const pts = [];
+      ctx.fillStyle = color(orig);
+      for (let k = 0; k < samples.ts.length; k++) {
+        const t = samples.ts[k], v = samples.values[k][i];
+        if (t === null || !isFinite(t) || v === null || !isFinite(v) || !xIn(t)) continue;
+        ctx.beginPath(); ctx.arc(x(t), y(v), 3.5, 0, Math.PI * 2); ctx.fill();
+        pts.push([x(t), y(v), v]);
+      }
+      if (pts.length && pts.length <= 12) {
+        ctx.font = "9px monospace";
+        for (const [px, py, v] of pts) {
+          ctx.fillText(fmtCode(v), px + 5, py - 5);
+        }
+      }
+    } else {
+      ctx.beginPath();
+      let started = false;
+      for (let k = 0; k < samples.ts.length; k++) {
+        const t = samples.ts[k], v = samples.values[k][i];
+        if (t === null || !isFinite(t) || v === null || !isFinite(v) || !xIn(t)) {
+          started = false;                    // gap: break the polyline
+          continue;
+        }
+        const px = x(t), py = y(v);
+        if (!started) { ctx.moveTo(px, py); started = true; }
+        else ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // nearest mode: dot in the middle of the lane
+    if (state.w1 - state.w0 <= 1e-9) {
+      const v = samples.values[0][i];
+      if (v !== null && isFinite(v)) {
+        ctx.fillStyle = color(orig);
+        ctx.beginPath();
+        ctx.arc(padL + (right - padL) / 2, y(v), 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+}
+
+// ── shared-scale mode: all channels on one y axis ────────────────────────
+
+function drawSharedScale(ctx, f, samples, lanes, bands, x, xIn, padL, padT, right, plotH, marker) {
+  // y range
+  let yMin = Infinity, yMax = -Infinity;
+  if (samples && lanes.length) {
+    for (const lane of lanes) {
+      const i = lane.pos;
+      for (const row of samples.values) {
+        const v = row[i];
+        if (v === null || !isFinite(v)) continue;   // NaN came back as JSON null
+        if (v < yMin) yMin = v;
+        if (v > yMax) yMax = v;
+      }
+    }
+  }
+  if (bands) {
+    for (const lane of lanes) {
+      const o = lane.orig;
+      const lo = bands.min[o], hi = bands.max[o];
+      if (lo === null || hi === null || !isFinite(lo) || !isFinite(hi)) continue;
+      yMin = Math.min(yMin, lo, hi);
+      yMax = Math.max(yMax, lo, hi);
+    }
+  }
+  if (!isFinite(yMin)) { yMin = -1; yMax = 1; }
+  if (yMax - yMin < 1e-9) { yMax = yMin + 1; }
+  const span = yMax - yMin;
+  yMin -= span * 0.05; yMax += span * 0.05;
+  const y = v => padT + (1 - (v - yMin) / (yMax - yMin)) * plotH;
+
+  // y ticks
+  ctx.fillStyle = "#8b949e";
+  for (let i = 0; i <= 4; i++) {
+    const v = yMin + (yMax - yMin) * i / 4;
+    const py = y(v);
+    ctx.strokeStyle = "#1c2229";
+    ctx.beginPath(); ctx.moveTo(padL, py); ctx.lineTo(right, py); ctx.stroke();
+    ctx.fillStyle = "#8b949e";
+    ctx.fillText(fmtVal(v), 2, py + 3);
+  }
+  ctx.strokeStyle = "#30363d";
+  ctx.beginPath(); ctx.moveTo(padL, y(0)); ctx.lineTo(right, y(0)); ctx.stroke();
+
+  // stats bands (min/max per channel over the episode)
+  if (bands && samples) {
+    for (const lane of lanes) {
+      const o = lane.orig;
+      const lo = bands.min[o], hi = bands.max[o];
+      if (lo === null || hi === null || !isFinite(lo) || !isFinite(hi)) continue;
+      ctx.strokeStyle = color(o); ctx.globalAlpha = 0.16; ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(padL, y(lo)); ctx.lineTo(right, y(lo));
+      ctx.moveTo(padL, y(hi)); ctx.lineTo(right, y(hi));
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // channel curves
+  if (samples && lanes.length) {
+    ctx.lineWidth = 1;
+    for (const lane of lanes) {
+      const i = lane.pos;
+      ctx.strokeStyle = color(lane.orig);
+      if (marker) {
+        // event channel: dots (no line), code labels when sparse
+        const pts = [];
+        ctx.fillStyle = color(lane.orig);
+        for (let k = 0; k < samples.ts.length; k++) {
+          const t = samples.ts[k], v = samples.values[k][i];
+          if (t === null || !isFinite(t) || v === null || !isFinite(v) || !xIn(t)) continue;
+          ctx.beginPath(); ctx.arc(x(t), y(v), 3.5, 0, Math.PI * 2); ctx.fill();
+          pts.push([x(t), y(v), v]);
+        }
+        if (pts.length && pts.length <= 12) {
+          ctx.font = "9px monospace";
+          for (const [px, py, v] of pts) ctx.fillText(fmtCode(v), px + 5, py - 5);
+        }
+        continue;
+      }
+      ctx.beginPath();
+      let started = false;
+      for (let k = 0; k < samples.ts.length; k++) {
+        const t = samples.ts[k], v = samples.values[k][i];
+        if (t === null || !isFinite(t) || v === null || !isFinite(v) || !xIn(t)) {
+          started = false;                    // gap: break the polyline
+          continue;
+        }
+        const px = x(t), py = y(v);
+        if (!started) { ctx.moveTo(px, py); started = true; }
+        else ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+    }
+  } else if (samples && !lanes.length) {
+    // nothing
+  } else {
+    ctx.fillStyle = "#4a5568"; ctx.font = "12px monospace";
+    ctx.fillText("无样本 (调整窗口或切换帧)", padL + 10, padT + plotH / 2);
+  }
+
+  // nearest mode: dots at the single sample
+  if (samples && state.w1 - state.w0 <= 1e-9 && lanes.length) {
+    for (const lane of lanes) {
+      const i = lane.pos;
+      const v = samples.values[0][i];
+      if (v === null || !isFinite(v)) continue;
+      ctx.fillStyle = color(lane.orig);
+      ctx.beginPath();
+      ctx.arc(padL + (right - padL) / 2, y(v), 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+// ── window dragging ─────────────────────────────────────────────────────
+
+function onPlotMouseDown(e, cv, f) {
+  const rect = cv.getBoundingClientRect();
+  const W = rect.width;
+  const padL = 46, padR = 10;
+  const plotW = W - padL - padR;
+  if (plotW <= 0 || state.w1 - state.w0 <= 1e-9) return;
+  const tAt = mx => state.w0 + (mx - padL) / plotW * (state.w1 - state.w0);
+  const mx = e.clientX - rect.left;
+  const xw0 = padL + (0 - state.w0) / (state.w1 - state.w0) * plotW; // x(w0)=padL
+  const xw1 = padL + plotW;                                           // x(w1)
+  let handle = null;
+  if (Math.abs(mx - xw0) < 10) handle = "w0";
+  else if (Math.abs(mx - xw1) < 10) handle = "w1";
+  if (!handle) return;
+  e.preventDefault();
+  state.dragging = { handle, tAt, rect };
+  window.addEventListener("mousemove", onDragMove);
+  window.addEventListener("mouseup", onDragEnd);
+}
+
+function onDragMove(e) {
+  const d = state.dragging;
+  if (!d) return;
+  const t = d.tAt(e.clientX - d.rect.left);
+  if (state.full) { state.full = false; syncPresetBtns(); }
+  if (d.handle === "w0") state.w0 = Math.min(t, state.w1 - 0.005);
+  else state.w1 = Math.max(t, state.w0 + 0.005);
+  syncWindowInputs();
+  requestRender();
+  scheduleRefresh();
+}
+
+function onDragEnd() {
+  state.dragging = null;
+  window.removeEventListener("mousemove", onDragMove);
+  window.removeEventListener("mouseup", onDragEnd);
+  refresh();
+}
+
+// ── tooltip ─────────────────────────────────────────────────────────────
+
+function onPlotMouseMove(e, cv, f) {
+  const tip = $("#tooltip");
+  const samples = state.data ? state.data.samples[f.key] : null;
+  if (!samples || !samples.ts.length) { tip.style.display = "none"; return; }
+  const vis = state.visible[f.key];
+  const lanes = samples.names.map((nm, i) => ({
+    pos: i,
+    orig: samples.indices ? samples.indices[i] : i,
+  })).filter(l => vis === null || vis.has(l.orig));
+  if (!lanes.length) { tip.style.display = "none"; return; }
+  const rect = cv.getBoundingClientRect();
+  const padL = 46, padR = 10;
+  const plotW = rect.width - padL - padR;
+  const mx = e.clientX - rect.left;
+  const t = state.w0 + (mx - padL) / plotW * (state.w1 - state.w0);
+  let k = 0, best = Infinity;
+  for (let j = 0; j < samples.ts.length; j++) {
+    const ts = samples.ts[j];
+    if (ts === null || !isFinite(ts)) continue;
+    const d = Math.abs(ts - t);
+    if (d < best) { best = d; k = j; }
+  }
+  const show = lanes.slice(0, 14);
+  let html = `<div class="tt-head">${f.key} @ ${(samples.ts[k] * 1000).toFixed(1)} ms</div>`;
+  for (const lane of show) {
+    html += `<div class="tt-row"><span style="color:${color(lane.orig)}">▮</span> ${samples.names[lane.pos]}: ${fmtVal(samples.values[k][lane.pos])}</div>`;
+  }
+  if (lanes.length > show.length) html += `<div class="tt-row">… +${lanes.length - show.length} 通道</div>`;
+  tip.innerHTML = html;
+  tip.style.display = "block";
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  tip.style.left = Math.min(e.clientX + 14, window.innerWidth - tw - 8) + "px";
+  tip.style.top = Math.min(e.clientY + 14, window.innerHeight - th - 8) + "px";
+}
+
+// ── modal ───────────────────────────────────────────────────────────────
+
+function openModal(key) {
+  const f = state.meta.features.find(x => x.key === key);
+  $("#modal-img").src =
+    `/api/video?ep=${state.ep}&f=${state.frame}&cam=${encodeURIComponent(key)}&scale=1&q=85`;
+  $("#modal .cap").textContent = `${key} · episode ${state.ep} · frame ${state.frame}`;
+  $("#modal").style.display = "flex";
+}
+$("#modal").addEventListener("click", () => { $("#modal").style.display = "none"; });
+window.addEventListener("keydown", e => {
+  if (e.key === "Escape") $("#modal").style.display = "none";
+});
+
+// ── helpers ─────────────────────────────────────────────────────────────
+
+function cssKey(k) { return k.replace(/\./g, "-"); }
+function fmtRate(r) { return r == null ? "?" : (r >= 100 ? Math.round(r) : r.toFixed(1)); }
+function fmtVal(v) {
+  if (v === null || v === undefined || !isFinite(v)) return "—";
+  const a = Math.abs(v);
+  if (a === 0) return "0";
+  if (a >= 10000 || a < 0.001) return v.toExponential(1);
+  return v.toFixed(a < 10 ? 2 : 1);
+}
+
+init();
+</script>
+</body>
+</html>

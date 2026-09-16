@@ -271,7 +271,12 @@ python -m examples.01read_simple
 
 # 交互式可视化
 python -m scripts.visualize --episode 0
+
+# 网页可视化（浏览器界面，可拖动时间窗口）
+python scripts/visualize_web.py [数据集目录]
 ```
+
+网页可视化支持对 EEG/EMG 条带做零相位滤波：在条带上打开"滤波"面板，可组合高通/低通 Butterworth 滤波与工频及其全部谐波的梳状陷波（内置 EEG/EMG 预设）。API 同样支持按 feature 传参：`/api/frame?...&filt=observation.eeg:hp=0.5,lp=40,notch=50`。
 
 ### 4.2 Demo 1：写入（01write_simple.py）
 
