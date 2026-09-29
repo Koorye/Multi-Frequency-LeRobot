@@ -25,7 +25,7 @@ class MultiFrequencyDatasetMetadata(LeRobotDatasetMetadata):
 
         for key, ft in self.features.items():
             dtype = ft.get("dtype", "")
-            if dtype in ("video", "image"):
+            if dtype in ("video", "image", "audio"):
                 continue
             if key in DEFAULT_FEATURES:
                 continue
@@ -91,7 +91,7 @@ class MultiFrequencyDatasetMetadata(LeRobotDatasetMetadata):
         obj._feature_fps_map = {}
         for key, ft in all_features.items():
             dtype = ft.get("dtype", "")
-            if dtype in ("video", "image"):
+            if dtype in ("video", "image", "audio"):
                 continue
             if key in DEFAULT_FEATURES:
                 continue

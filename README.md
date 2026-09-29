@@ -21,7 +21,8 @@
     - [4.5 Demo 4: Window Modes (03window_example.py)](#45-demo-4-window-modes-03window_examplepy)
     - [4.6 Demo 5: Delta Timestamps (04delta_example.py)](#46-demo-5-delta-timestamps-04delta_examplepy)
     - [4.7 Demo 6: Asynchronous Sensor Startup (05async_startup_example.py)](#47-demo-6-asynchronous-sensor-startup-05async_startup_examplepy)
-    - [4.8 Visualizer Controls](#48-visualizer-controls)
+    - [4.8 Demo 7: Audio (06audio_example.py)](#48-demo-7-audio-06audio_examplepy)
+    - [4.9 Visualizer Controls](#49-visualizer-controls)
   - [5. Core Concepts](#5-core-concepts)
     - [5.1 Per-Feature Independent Storage](#51-per-feature-independent-storage)
     - [5.2 Task as the Master Clock](#52-task-as-the-master-clock)
@@ -62,6 +63,7 @@ flowchart LR
     IX["MasterIndex record_frame(ts, task)"]
     PF["ParquetFeature buffer.append(ts, data)"]
     VF["VideoFeature save PNG + timestamp list"]
+    AuF["AudioFeature buffer chunks + timestamp list"]
 
     MI[("master_index.parquet timestamp | task | frame_index")]
     P1[("imu.parquet 1000Hz × 6d")]
@@ -69,27 +71,35 @@ flowchart LR
     P3[("state.parquet 30Hz × 7d")]
     C1[("head_rgb.parquet timestamps only")]
     V1[("head_rgb.mp4 30fps video")]
+    A1[("mic.parquet timestamp | num_samples")]
+    W1[("mic.wav 16kHz audio")]
 
     AF -->|"key = task"| IX
     AF -->|"key = sensor<br/>imu / eeg / state"| PF
     AF -->|"key = video"| VF
+    AF -->|"key = audio"| AuF
     IX --> MI
     PF --> P1
     PF --> P2
     PF --> P3
     VF --> C1
     VF --> V1
+    AuF --> A1
+    AuF --> W1
 
     style AF fill:#fafafa,stroke:#9e9e9e,color:#000
     style IX fill:#e1f5fe,stroke:#4fc3f7,color:#000
     style PF fill:#fafafa,stroke:#9e9e9e,color:#000
     style VF fill:#f3e5f5,stroke:#9c27b0,color:#000
+    style AuF fill:#e8f5e9,stroke:#66bb6a,color:#000
     style MI fill:#e1f5fe,stroke:#4fc3f7,color:#000
     style P1 fill:#fff3e0,stroke:#ff9800,color:#000
-    style P2 fill:#e8f5e9,stroke:#4caf50,color:#000
+    style P2 fill:#fff3e0,stroke:#ff9800,color:#000
     style P3 fill:#fce4ec,stroke:#e91e63,color:#000
     style C1 fill:#f3e5f5,stroke:#9c27b0,color:#000
     style V1 fill:#f3e5f5,stroke:#9c27b0,color:#000
+    style A1 fill:#e8f5e9,stroke:#4caf50,color:#000
+    style W1 fill:#e8f5e9,stroke:#4caf50,color:#000
 ```
 
 **Reading** — look up the master-clock timestamp in `master_index`, then query each feature by that timestamp:
@@ -271,7 +281,15 @@ python -m examples.01read_simple
 
 # interactive visualizer
 python -m scripts.visualize --episode 0
+
+# web visualizer (browser UI, draggable time window)
+python scripts/visualize_web.py [DATASET_ROOT]
+
+# audio: microphone stored as WAV + timestamp parquet
+python -m examples.06audio_example
 ```
+
+The web visualizer supports optional zero-phase filtering of EEG/EMG strips: open the 滤波 panel on a strip and combine a high-pass / low-pass Butterworth with a comb notch at the line frequency and all its harmonics (EEG/EMG presets included). The API takes the same spec per feature: `/api/frame?...&filt=observation.eeg:hp=0.5,lp=40,notch=50`.
 
 ### 4.2 Demo 1: Writing (01write_simple.py)
 
@@ -377,7 +395,20 @@ Two consequences worth knowing:
 python -m examples.05async_startup_example
 ```
 
-### 4.8 Visualizer Controls
+### 4.8 Demo 7: Audio (06audio_example.py)
+
+One camera + state + a simulated microphone, showing the audio storage path end to end:
+
+- `dtype: "audio"` features define `shape` as one chunk of samples `(n_samples,)` (mono) or `(n_samples, channels)` and require `sample_rate`
+- one `add_frame` per master frame stores one chunk; `save_episode()` concatenates all chunks into one PCM16 WAV per episode under `audios/`, plus a timestamp parquet index (`timestamp | episode_index | num_samples`) next to the other per-feature parquets
+- reading `ds[i]` in nearest mode resolves the chunk nearest the master timestamp through the parquet index and returns it whole — the atomic unit, analogous to one video frame; with a `window` (spec, `window_overrides`, or a direct `read(..., window=(start, end))` argument) it returns every sample whose time lies in `(t + start, t + end]`, sliced with sample precision across chunk boundaries and concatenated
+- the alignment checker reports WAV integrity: chunk count vs index rows, sample count vs summed index
+
+```bash
+python -m examples.06audio_example
+```
+
+### 4.9 Visualizer Controls
 
 **Visualizer** (`python -m scripts.visualize --episode 0`):
 
@@ -412,6 +443,11 @@ videos/
 └── chunk-000/
     └── observation.images.head_rgb/
         └── episode_000000.mp4
+
+audios/
+└── chunk-000/
+    └── observation.audio.mic/
+        └── episode_000000.wav
 ```
 
 Every non-video feature gets one parquet with a uniform column layout:
@@ -423,6 +459,7 @@ timestamp (float64) | episode_index (int64) | col_0 (float32) | ... | col_D (flo
 - camera-rate features (state, action): one row per frame, rows = frames
 - high-rate features (imu, eeg): multiple samples between frames, rows = rate × duration
 - camera features: timestamp parquet + MP4 video
+- audio features: timestamp parquet (`timestamp | episode_index | num_samples`, one row per added chunk) + one WAV per episode; chunks are concatenated in timestamp order
 
 ### 5.2 Task as the Master Clock
 
@@ -448,9 +485,9 @@ The master-clock frame timestamp is the query anchor, but a feature's readings d
 
 | `window` value | Behavior | Typical use |
 |------------|------|---------|
-| `None` (default) | nearest neighbor: return the single closest reading | camera-rate sensors (state, action) |
+| `None` (default) | nearest neighbor: return the single closest reading | camera-rate sensors (state, action); audio: one whole chunk |
 | `"interpolate"` | linear interpolation at the query time | mid-rate sensors (finger pose) |
-| `(start_s, end_s)` | range query: return all readings in `(t+start, t+end]` | high-rate sensors (IMU, EEG, EMG) |
+| `(start_s, end_s)` | range query: return all readings in `(t+start, t+end]` | high-rate sensors (IMU, EEG, EMG); audio: sample-precise slice + concat |
 
 ```python
 # IMU at 1000Hz, 30fps master → ~33 readings per frame
@@ -504,32 +541,35 @@ ds = MultiFrequencyLeRobotDataset.create(
 ```python
 features = {
     "feature_key": {
-        "dtype": "video" | "float32" | "int64",   # required
-        "shape": (H, W, C) | (D,),                # required
+        "dtype": "video" | "audio" | "float32" | "int64",  # required
+        "shape": (H, W, C) | (N,) | (D,),         # required
         "names": ["col_0", ...],                  # required
         # optional:
         "fps": 1000,              # sampling rate of this feature
         "window": (-0.033, 0.0),  # query window
         "timestamp_start": 0.1,   # timestamp start offset
         "tolerance_s": 0.002,     # alignment tolerance
+        "sample_rate": 16000,     # audio only: sample rate of the WAV
     }
 }
 ```
 
 | Field | Type | Required | Description |
 |------|------|------|------|
-| `dtype` | `str` | ✓ | storage type: `"float32"` (continuous), `"int64"` (discrete/id), `"video"` (camera frames) |
-| `shape` | `tuple` | ✓ | shape of a single reading: `(D,)` for numeric features, `(H, W, C)` for video |
+| `dtype` | `str` | ✓ | storage type: `"float32"` (continuous), `"int64"` (discrete/id), `"video"` (camera frames), `"audio"` (microphone chunks) |
+| `shape` | `tuple` | ✓ | shape of a single reading: `(D,)` for numeric features, `(H, W, C)` for video, `(n_samples,)` or `(n_samples, channels)` for audio |
 | `names` | `list[str]` | ✓ | column name per dimension (used as parquet column names) |
 | `fps` | `float` | optional | sampling rate of this feature; timestamps are auto-generated as `timestamp_start + counter × 1/fps`; falls back to master-clock `fps` if omitted |
 | `window` | `None \| "interpolate" \| (start, end)` | `None` | how readings are aggregated at query time (see 5.3) |
 | `timestamp_start` | `float` | `0.0` | timestamp start offset, e.g. the sensor only starts recording at t=0.1s |
 | `tolerance_s` | `float` | `None` | alignment tolerance: after `save_episode()`, per-frame nearest-reading gaps are checked and violations are logged to `meta/alignment_check.jsonl` |
+| `sample_rate` | `int` | audio only | sample rate of the WAV file (e.g. 16000); required for `dtype="audio"` |
 
 Conventions and tips:
 
 - feature keys follow LeRobot naming and **must not contain `/`** (e.g. `observation.imu`, `action`)
 - `dtype="video"` features only store a timestamp parquet; images are encoded as MP4 under `videos/`
+- `dtype="audio"` features store one WAV per episode under `audios/` plus a timestamp parquet; each `add_frame` passes one chunk of float32 samples in [-1, 1] (`(n_samples,)` mono or `(n_samples, channels)`). Nearest read returns one whole chunk; a `window` `(start, end)` read returns the samples in `(t+start, t+end]` concatenated (timing contract: a chunk's first sample sits at its label, samples advance at exactly `1/sample_rate`, real dropouts shorten the segment rather than stretch it)
 - always give high-rate features both `fps` and `window` — otherwise the nearest-neighbor query returns a single reading and the high-rate information is lost
 
 ### Writing
@@ -614,6 +654,12 @@ item = ds[10]
 #
 #     # video feature: CHW format
 #     "observation.images.head_rgb": tensor([3, 480, 640]),
+#
+#     # audio feature: one chunk of samples, float32 in [-1, 1]
+#     "observation.audio.mic": tensor([533]),
+#
+#     # audio feature with window (-0.033, 0): samples in (t-33ms, t], concatenated
+#     "observation.audio.mic": tensor([528]),
 # }
 ```
 
@@ -633,6 +679,7 @@ flowchart TB
     subgraph Features["feature layer"]
         PF["ParquetFeature<br/>parquet.py"]
         VF["VideoFeature<br/>video.py"]
+        AuF["AudioFeature<br/>audio.py"]
     end
 
     subgraph Validate["validation layer"]
@@ -642,6 +689,7 @@ flowchart TB
     subgraph Store["storage layer"]
         PQ[("parquet files<br/>data/chunk-*/episode_*/")]
         MP4[("MP4 videos<br/>videos/chunk-*/")]
+        WAV[("WAV audio<br/>audios/chunk-*/")]
         META[("metadata<br/>meta/")]
     end
 
@@ -649,10 +697,13 @@ flowchart TB
     DS -->|"info.json / metadata"| MD
     DS -->|"write readings / window query"| PF
     DS -->|"write images / decode videos"| VF
+    DS -->|"write chunks / read WAV"| AuF
     DS -->|"post-save validation"| CK
     PF -->|"save / read"| PQ
     VF -->|"encode MP4"| MP4
     VF -->|"timestamp table"| PQ
+    AuF -->|"write WAV"| WAV
+    AuF -->|"timestamp table"| PQ
     IX -->|"save"| PQ
     MD -->|"save"| META
     CK -->|"validation report"| META
@@ -662,9 +713,11 @@ flowchart TB
     style MD fill:#fafafa,stroke:#9e9e9e,color:#000
     style PF fill:#e8f5e9,stroke:#66bb6a,color:#000
     style VF fill:#f3e5f5,stroke:#ce93d8,color:#000
+    style AuF fill:#e8f5e9,stroke:#66bb6a,color:#000
     style CK fill:#fff3e0,stroke:#ffcc80,color:#000
     style PQ fill:#fafafa,stroke:#9e9e9e,color:#000
     style MP4 fill:#fafafa,stroke:#9e9e9e,color:#000
+    style WAV fill:#fafafa,stroke:#9e9e9e,color:#000
     style META fill:#fafafa,stroke:#9e9e9e,color:#000
 ```
 
@@ -672,18 +725,19 @@ flowchart TB
 
 ```
 src/mf_lerobot/
-├── dataset.py      (309 lines)  orchestrator — add_frame / save_episode / __getitem__
+├── dataset.py      (341 lines)  orchestrator — add_frame / save_episode / __getitem__
+├── audio.py        (185 lines)  AudioFeature — buffer chunks, write WAV + timestamp parquet
 ├── parquet.py      (168 lines)  ParquetFeature — write buffer, save parquet, load, window query
-├── video.py        (137 lines)  VideoFeature — save PNG, encode MP4, decode frames
-├── index.py        (129 lines)  MasterIndex — frame index I/O
+├── video.py        (168 lines)  VideoFeature — save PNG, encode MP4, decode frames
+├── index.py        (127 lines)  MasterIndex — frame index I/O
 ├── metadata.py     (123 lines)  MultiFrequencyDatasetMetadata — info.json management
-├── checker.py      (116 lines)  DatasetChecker — video frame count + timestamp alignment checks
-└── utils.py        (214 lines)  constants + info.json creation/validation
+├── checker.py      (162 lines)  DatasetChecker — video frame count + audio integrity + timestamp alignment checks
+└── utils.py        (236 lines)  constants + info.json creation/validation
 ```
 
 **Design principles:**
 
-1. **One object per feature**: `ParquetFeature` and `VideoFeature` each encapsulate their buffer, file paths, and read/write logic. The Dataset is only an orchestrator.
+1. **One object per feature**: `ParquetFeature`, `VideoFeature` and `AudioFeature` each encapsulate their buffer, file paths, and read/write logic. The Dataset is only an orchestrator.
 
 2. **Symmetric read/write**: every Feature provides both `add/save` (write) and `load/query` (read).
 
@@ -703,6 +757,7 @@ src/mf_lerobot/
 | Metadata | `episodes.jsonl` records everything | only basic frame info; paths computed deterministically |
 | per-feature fps | not supported | independent `fps` per feature |
 | per-feature tolerance | global `tolerance_s` | independent `tolerance_s` per feature |
+| Audio storage | not supported | WAV per episode + timestamp parquet index, nearest-chunk read |
 | Write API | `add_frame(frame_dict, task)` | `add_frame(key, value)` per field |
 | Alignment check | none | automatic `alignment_check.jsonl` |
 | Video check | none | automatic frame count/duration check |

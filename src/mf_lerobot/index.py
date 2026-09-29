@@ -92,9 +92,7 @@ class MasterIndex:
         if files:
             hf_dataset = hf_load_dataset("parquet", data_files=files, split="train")
         else:
-            from lerobot.datasets.lerobot_dataset import LeRobotDataset
-            hf_dataset = LeRobotDataset.create_hf_dataset(self.ds)
-            hf_dataset.set_transform(hf_transform_to_torch)
+            hf_dataset = self.ds.create_hf_dataset()
             return hf_dataset
         hf_dataset.set_transform(hf_transform_to_torch)
         return hf_dataset

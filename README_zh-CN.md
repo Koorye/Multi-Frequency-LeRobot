@@ -21,7 +21,8 @@
     - [4.5 Demo 4：Window 模式（03window_example.py）](#45-demo-4window-模式03window_examplepy)
     - [4.6 Demo 5：Delta 时间戳（04delta_example.py）](#46-demo-5delta-时间戳04delta_examplepy)
     - [4.7 Demo 6：异步传感器启动（05async_startup_example.py）](#47-demo-6异步传感器启动05async_startup_examplepy)
-    - [4.8 可视化操作](#48-可视化操作)
+    - [4.8 Demo 7：音频（06audio_example.py）](#48-demo-7音频06audio_examplepy)
+    - [4.9 可视化操作](#49-可视化操作)
   - [5. 核心概念](#5-核心概念)
     - [5.1 每特征独立存储](#51-每特征独立存储)
     - [5.2 Task 即主时钟](#52-task-即主时钟)
@@ -62,6 +63,7 @@ flowchart LR
     IX["MasterIndex record_frame(ts, task)"]
     PF["ParquetFeature buffer.append(ts, data)"]
     VF["VideoFeature 保存 PNG + 时间戳列表"]
+    AuF["AudioFeature 缓冲音频块 + 时间戳列表"]
 
     MI[("master_index.parquet timestamp | task | frame_index")]
         P1[("imu.parquet 1000Hz × 6d")]
@@ -69,27 +71,35 @@ flowchart LR
         P3[("state.parquet 30Hz × 7d")]
         C1[("head_rgb.parquet timestamps only")]
         V1[("head_rgb.mp4 30fps video")]
+        A1[("mic.parquet timestamp | num_samples")]
+        W1[("mic.wav 16kHz audio")]
 
     AF -->|"key = task"| IX
     AF -->|"key = sensor<br/>imu / eeg / state"| PF
     AF -->|"key = video"| VF
+    AF -->|"key = audio"| AuF
     IX --> MI
     PF --> P1
     PF --> P2
     PF --> P3
     VF --> C1
     VF --> V1
+    AuF --> A1
+    AuF --> W1
 
     style AF fill:#fafafa,stroke:#9e9e9e,color:#000
     style IX fill:#e1f5fe,stroke:#4fc3f7,color:#000
     style PF fill:#fafafa,stroke:#9e9e9e,color:#000
     style VF fill:#f3e5f5,stroke:#9c27b0,color:#000
+    style AuF fill:#e8f5e9,stroke:#66bb6a,color:#000
     style MI fill:#e1f5fe,stroke:#4fc3f7,color:#000
     style P1 fill:#fff3e0,stroke:#ff9800,color:#000
     style P2 fill:#e8f5e9,stroke:#4caf50,color:#000
     style P3 fill:#fce4ec,stroke:#e91e63,color:#000
     style C1 fill:#f3e5f5,stroke:#9c27b0,color:#000
     style V1 fill:#f3e5f5,stroke:#9c27b0,color:#000
+    style A1 fill:#e8f5e9,stroke:#4caf50,color:#000
+    style W1 fill:#e8f5e9,stroke:#4caf50,color:#000
 ```
 
 **读取** — 先查 `master_index` 得到主时钟时间戳，再按时间戳查询各 feature：
@@ -271,7 +281,15 @@ python -m examples.01read_simple
 
 # 交互式可视化
 python -m scripts.visualize --episode 0
+
+# 网页可视化（浏览器界面，可拖动时间窗口）
+python scripts/visualize_web.py [数据集目录]
+
+# 音频：麦克风以 WAV + 时间戳 parquet 存储
+python -m examples.06audio_example
 ```
+
+网页可视化支持对 EEG/EMG 条带做零相位滤波：在条带上打开"滤波"面板，可组合高通/低通 Butterworth 滤波与工频及其全部谐波的梳状陷波（内置 EEG/EMG 预设）。API 同样支持按 feature 传参：`/api/frame?...&filt=observation.eeg:hp=0.5,lp=40,notch=50`。
 
 ### 4.2 Demo 1：写入（01write_simple.py）
 
@@ -377,7 +395,20 @@ demo 算出 `t_all_started = 0.31 s`，取主时钟的下一帧作为 t = 0，�
 python -m examples.05async_startup_example
 ```
 
-### 4.8 可视化操作
+### 4.8 Demo 7：音频（06audio_example.py）
+
+一路相机 + state + 一个模拟麦克风，端到端演示音频存储路径：
+
+- `dtype: "audio"` 的 feature，`shape` 定义单个音频块的形状 `(n_samples,)`（单声道）或 `(n_samples, channels)`（多声道），且必须提供 `sample_rate`
+- 每个主帧一次 `add_frame` 存一个音频块；`save_episode()` 把所有块按时间顺序拼接为一个 PCM16 WAV 存到 `audios/`，同时在其余 per-feature parquet 旁写一个时间戳索引（`timestamp | episode_index | num_samples`）
+- 读取 `ds[i]`：最近邻模式经 parquet 索引解析出距主时钟时间戳最近的块并整块返回——原子单元，类比视频一帧；设置 `window`（spec、`window_overrides` 或直接 `read(..., window=(start, end))`）则返回时间落在 `(t + start, t + end]` 的所有采样，跨块按采样精度截取后拼接
+- 对齐校验器同时报告 WAV 完整性：块数 vs 索引行数、采样数 vs 索引总和
+
+```bash
+python -m examples.06audio_example
+```
+
+### 4.9 可视化操作
 
 **可视化效果**（`python -m scripts.visualize --episode 0`）：
 
@@ -412,6 +443,11 @@ videos/
 └── chunk-000/
     └── observation.images.head_rgb/
         └── episode_000000.mp4
+
+audios/
+└── chunk-000/
+    └── observation.audio.mic/
+        └── episode_000000.wav
 ```
 
 每个非视频 feature 一个 parquet，列格式统一：
@@ -423,6 +459,7 @@ timestamp (float64) | episode_index (int64) | col_0 (float32) | ... | col_D (flo
 - 相机帧率特征（state, action）：每帧一行，行数 = 帧数
 - 高频特征（imu, eeg）：帧间多次采样，行数 = 频率 × 时长
 - 相机特征：timestamp parquet + MP4 视频
+- 音频特征：timestamp parquet（`timestamp | episode_index | num_samples`，每次 `add_frame` 一行）+ 每 episode 一个 WAV，块按时间顺序拼接
 
 ### 5.2 Task 即主时钟
 
@@ -447,9 +484,9 @@ ds.add_frame("observation.images.cam", image)
 
 | `window` 值 | 行为 | 适用场景 |
 |------------|------|---------|
-| `None`（默认） | 最近邻：返回时间最接近的单个读数 | 相机帧率传感器 (state, action) |
+| `None`（默认） | 最近邻：返回时间最接近的单个读数 | 相机帧率传感器 (state, action)；音频：返回一整块 |
 | `"interpolate"` | 线性插值：在查询时间点插值 | 中等频率传感器 (finger pose) |
-| `(start_s, end_s)` | 区间查询：返回 `(t+start, t+end]` 所有读数 | 高频传感器 (IMU, EEG, EMG) |
+| `(start_s, end_s)` | 区间查询：返回 `(t+start, t+end]` 所有读数 | 高频传感器 (IMU, EEG, EMG)；音频：采样级截取 + 拼接 |
 
 ```python
 # IMU at 1000Hz, 30fps master → ~33 readings per frame
@@ -503,32 +540,35 @@ ds = MultiFrequencyLeRobotDataset.create(
 ```python
 features = {
     "feature_key": {
-        "dtype": "video" | "float32" | "int64",   # 必填
-        "shape": (H, W, C) | (D,),                # 必填
+        "dtype": "video" | "audio" | "float32" | "int64",  # 必填
+        "shape": (H, W, C) | (N,) | (D,),         # 必填
         "names": ["col_0", ...],                  # 必填
         # 可选：
         "fps": 1000,              # 此 feature 的采样率
         "window": (-0.033, 0.0),  # 查询窗口
         "timestamp_start": 0.1,   # 时间戳起始偏移
         "tolerance_s": 0.002,     # 对齐容差
+        "sample_rate": 16000,     # 仅 audio：WAV 采样率
     }
 }
 ```
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `dtype` | `str` | ✓ | 存储类型：`"float32"`（连续量）、`"int64"`（离散量/id）、`"video"`（相机帧） |
-| `shape` | `tuple` | ✓ | 单个读数的形状：数值 feature 为 `(D,)`，视频为 `(H, W, C)` |
+| `dtype` | `str` | ✓ | 存储类型：`"float32"`（连续量）、`"int64"`（离散量/id）、`"video"`（相机帧）、`"audio"`（麦克风音频块） |
+| `shape` | `tuple` | ✓ | 单个读数的形状：数值 feature 为 `(D,)`，视频为 `(H, W, C)`，音频为 `(n_samples,)` 或 `(n_samples, channels)` |
 | `names` | `list[str]` | ✓ | 每个维度的列名（作为 parquet 列名） |
 | `fps` | `float` | 可选 | 该 feature 的采样率，自动生成时间戳 `timestamp_start + counter × 1/fps`；不填回退到主时钟 `fps` |
 | `window` | `None \| "interpolate" \| (start, end)` | `None` | 查询时如何聚合读数（见 5.3） |
 | `timestamp_start` | `float` | `0.0` | 时间戳起始偏移，如传感器在 t=0.1s 才开始记录 |
 | `tolerance_s` | `float` | `None` | 对齐容差：`save_episode()` 后检查每帧最近读数的偏差，超差记录到 `meta/alignment_check.jsonl` |
+| `sample_rate` | `int` | 仅 audio | WAV 文件的采样率（如 16000）；`dtype="audio"` 必填 |
 
 约定与提示：
 
 - feature key 遵循 LeRobot 命名约定，**不可包含 `/`**（如 `observation.imu`、`action`）
 - `dtype="video"` 的特征只存时间戳 parquet，图像编码为 MP4 存在 `videos/` 下
+- `dtype="audio"` 的特征每 episode 存一个 WAV 到 `audios/`，外加时间戳 parquet；每次 `add_frame` 传入一个 [-1, 1] 的 float32 采样块（`(n_samples,)` 单声道或 `(n_samples, channels)` 多声道）。最近邻读取返回一整块；`window` `(start, end)` 读取返回 `(t+start, t+end]` 内的采样拼接（时间契约：块首采样 = 标签时刻，块内严格 1/sample_rate，真实丢块只会让返回段变短、绝不拉伸内容）
 - 高频 feature 务必同时给 `fps` + `window`——否则查询按最近邻只返回 1 个读数，高频信息会丢失
 
 ### 写入
@@ -613,6 +653,12 @@ item = ds[10]
 #
 #     # Video feature: CHW 格式
 #     "observation.images.head_rgb": tensor([3, 480, 640]),
+#
+#     # Audio feature: 一个采样块，[-1, 1] 的 float32
+#     "observation.audio.mic": tensor([533]),
+#
+#     # Audio feature + window (-0.033, 0)：(t-33ms, t] 内的采样拼接
+#     "observation.audio.mic": tensor([528]),
 # }
 ```
 
@@ -632,6 +678,7 @@ flowchart TB
     subgraph Features["特征层"]
         PF["ParquetFeature<br/>parquet.py"]
         VF["VideoFeature<br/>video.py"]
+        AuF["AudioFeature<br/>audio.py"]
     end
 
     subgraph Validate["校验层"]
@@ -641,6 +688,7 @@ flowchart TB
     subgraph Store["存储层"]
         PQ[("parquet 文件<br/>data/chunk-*/episode_*/")]
         MP4[("MP4 视频<br/>videos/chunk-*/")]
+        WAV[("WAV 音频<br/>audios/chunk-*/")]
         META[("元数据<br/>meta/")]
     end
 
@@ -648,10 +696,13 @@ flowchart TB
     DS -->|"info.json / 元数据"| MD
     DS -->|"读数写入 / 窗口查询"| PF
     DS -->|"图像写入 / 视频解码"| VF
+    DS -->|"音频块写入 / WAV 读取"| AuF
     DS -->|"落盘后校验"| CK
     PF -->|"保存 / 读取"| PQ
     VF -->|"编码 MP4"| MP4
     VF -->|"时间戳表"| PQ
+    AuF -->|"写 WAV"| WAV
+    AuF -->|"时间戳表"| PQ
     IX -->|"保存"| PQ
     MD -->|"保存"| META
     CK -->|"校验报告"| META
@@ -661,9 +712,11 @@ flowchart TB
     style MD fill:#fafafa,stroke:#9e9e9e,color:#000
     style PF fill:#e8f5e9,stroke:#66bb6a,color:#000
     style VF fill:#f3e5f5,stroke:#ce93d8,color:#000
+    style AuF fill:#e8f5e9,stroke:#66bb6a,color:#000
     style CK fill:#fff3e0,stroke:#ffcc80,color:#000
     style PQ fill:#fafafa,stroke:#9e9e9e,color:#000
     style MP4 fill:#fafafa,stroke:#9e9e9e,color:#000
+    style WAV fill:#fafafa,stroke:#9e9e9e,color:#000
     style META fill:#fafafa,stroke:#9e9e9e,color:#000
 ```
 
@@ -671,18 +724,19 @@ flowchart TB
 
 ```
 src/mf_lerobot/
-├── dataset.py      (309行)  编排器 — add_frame / save_episode / __getitem__
+├── dataset.py      (341行)  编排器 — add_frame / save_episode / __getitem__
+├── audio.py        (185行)  AudioFeature — 缓冲音频块、写 WAV + 时间戳 parquet
 ├── parquet.py      (168行)  ParquetFeature — 写缓冲、存 parquet、加载、窗口查询
-├── video.py        (137行)  VideoFeature — 存 PNG、编码 MP4、解码帧
-├── index.py        (129行)  MasterIndex — 帧索引的读写
+├── video.py        (168行)  VideoFeature — 存 PNG、编码 MP4、解码帧
+├── index.py        (127行)  MasterIndex — 帧索引的读写
 ├── metadata.py     (123行)  MultiFrequencyDatasetMetadata — info.json 管理
-├── checker.py      (116行)  DatasetChecker — 视频帧数 + 时间戳对齐校验
-└── utils.py        (214行)  常量 + info.json 创建/校验
+├── checker.py      (162行)  DatasetChecker — 视频帧数 + 音频完整性 + 时间戳对齐校验
+└── utils.py        (236行)  常量 + info.json 创建/校验
 ```
 
 **设计原则：**
 
-1. **每 feature 一个对象**：`ParquetFeature` 和 `VideoFeature` 各自封装 buffer、文件路径、读写逻辑。Dataset 只是编排器。
+1. **每 feature 一个对象**：`ParquetFeature`、`VideoFeature` 和 `AudioFeature` 各自封装 buffer、文件路径、读写逻辑。Dataset 只是编排器。
 
 2. **读写对称**：每个 Feature 同时提供 `add/save`（写）和 `load/query`（读）。
 
@@ -702,6 +756,7 @@ src/mf_lerobot/
 | 元数据 | `episodes.jsonl` 记录所有信息 | 仅记录基本帧信息，路径确定性计算 |
 | per-feature fps | 不支持 | 每个 feature 独立 `fps` |
 | per-feature tolerance | 全局 `tolerance_s` | 每个 feature 独立 `tolerance_s` |
+| 音频存储 | 不支持 | 每 episode 一个 WAV + 时间戳 parquet 索引，最近块读取 |
 | 写入 API | `add_frame(frame_dict, task)` | `add_frame(key, value)` per-field |
 | 对齐校验 | 无 | 自动检查 `alignment_check.jsonl` |
 | 视频校验 | 无 | 自动检查帧数/时长 |

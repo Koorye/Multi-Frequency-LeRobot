@@ -1,7 +1,8 @@
 """Multi-frequency LeRobot dataset.
 
 Extends LeRobotDataset with per-field add_frame and per-feature parquet storage.
-Each non-video feature is backed by a ParquetFeature; cameras by VideoFeature.
+Each non-video feature is backed by a ParquetFeature; cameras by VideoFeature;
+microphones by AudioFeature.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from .checker import DatasetChecker
 from .parquet import ParquetFeature
 from .video import VideoFeature
+from .audio import AudioFeature
 from .index import MasterIndex
 from .metadata import MultiFrequencyDatasetMetadata
 from .utils import DEFAULT_FEATURES
@@ -72,7 +74,7 @@ class MultiFrequencyLeRobotDataset(LeRobotDataset):
         self._window_overrides = window_overrides or {}
         self._counters: dict[str, int] = {}
 
-        self._features: dict[str, ParquetFeature | VideoFeature] = {}
+        self._features: dict[str, ParquetFeature | VideoFeature | AudioFeature] = {}
         for key, ft in self.meta.features.items():
             if key in DEFAULT_FEATURES:
                 continue
@@ -81,6 +83,11 @@ class MultiFrequencyLeRobotDataset(LeRobotDataset):
                     key, ft, self.root,
                     backend=video_backend or "pyav",
                     tolerance_s=tolerance_s,
+                )
+            elif ft.get("dtype") == "audio":
+                self._features[key] = AudioFeature(
+                    key, ft, self.root,
+                    window_overrides.get(key) if window_overrides else None,
                 )
             else:
                 self._features[key] = ParquetFeature(
@@ -153,6 +160,11 @@ class MultiFrequencyLeRobotDataset(LeRobotDataset):
                     backend=video_backend or "pyav",
                     tolerance_s=1e-4,
                 )
+            elif ft.get("dtype") == "audio":
+                obj._features[key] = AudioFeature(
+                    key, ft, obj.root,
+                    window_overrides.get(key) if window_overrides else None,
+                )
             else:
                 obj._features[key] = ParquetFeature(
                     key, ft, obj.root,
@@ -166,6 +178,24 @@ class MultiFrequencyLeRobotDataset(LeRobotDataset):
 
     def get_episodes_file_paths(self) -> list[str]:
         return self.index.file_paths()
+
+    def create_hf_dataset(self):
+        """Empty HF dataset with index columns only.
+
+        Overrides the lerobot default, which maps every feature into HF
+        columns and rejects dtype="audio" (not a pyarrow type).  Data, video
+        and audio features live in their own files, so the merged frame
+        table only ever holds the index columns.
+        """
+        from datasets import Dataset
+        from lerobot.datasets.utils import hf_transform_to_torch
+
+        features = self.index.hf_features()
+        hf_dataset = Dataset.from_dict(
+            {col: [] for col in features}, features=features
+        )
+        hf_dataset.set_transform(hf_transform_to_torch)
+        return hf_dataset
 
     @property
     def hf_features(self):
@@ -229,12 +259,16 @@ class MultiFrequencyLeRobotDataset(LeRobotDataset):
         # Save all features
         chunks_size = self.meta.info.get("chunks_size", 1000)
         has_video = False
+        has_audio = False
         for f in self._features.values():
             if isinstance(f, ParquetFeature):
                 f.save(chunks_size)
             elif isinstance(f, VideoFeature):
                 f.save()
                 has_video = True
+            elif isinstance(f, AudioFeature):
+                f.save()
+                has_audio = True
 
         if has_video and ep_idx == 0:
             self.meta.update_video_info()
@@ -252,6 +286,8 @@ class MultiFrequencyLeRobotDataset(LeRobotDataset):
         checker = DatasetChecker(self)
         if has_video:
             checker.check_video_frames(ep_idx, episode_length, self.index.records)
+        if has_audio:
+            checker.check_audio_frames(ep_idx, episode_length, self.index.records)
         checker.check_episode_alignment(ep_idx, episode_length, self.index.records)
 
         # Batch encoding — native lerobot encodes every N episodes
@@ -299,6 +335,8 @@ class MultiFrequencyLeRobotDataset(LeRobotDataset):
                 if self.image_transforms is not None:
                     frame = self.image_transforms(frame)
                 item[f.key] = frame
+            elif isinstance(f, AudioFeature):
+                item[f.key] = f.read(ep, ts)
             else:
                 if self.delta_indices is not None:
                     results = [f.query(ep, t) for t in query_ts_list]

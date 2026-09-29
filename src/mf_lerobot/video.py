@@ -30,6 +30,7 @@ class VideoFeature:
         self._ep_idx = 0
         self._frame_count = 0
         self._timestamps: list[float] = []
+        self._ts_cache: dict[int, np.ndarray] = {}
 
     # ── Image path ──
 
@@ -125,13 +126,43 @@ class VideoFeature:
         self._timestamps = []
 
     def read(self, ep_idx: int, timestamp: float) -> torch.Tensor:
+        """Frame whose stored timestamp is nearest to ``timestamp``.
+
+        The video itself is constant-fps, so its pts sit on a k/fps grid while
+        real sensor timestamps jitter around it — decoding by timestamp alone
+        fails tiny tolerances.  Resolve the frame through the timestamps
+        parquet first (same semantics as lerobot's native video decoder),
+        then decode that exact grid position.
+        """
         ep_chunk = ep_idx // self.spec.get("chunks_size", 1000)
         video_path = self.root / DEFAULT_VIDEO_PATH.format(
             episode_chunk=ep_chunk, video_key=self.key, episode_index=ep_idx,
         )
+        ts = self._load_timestamps(ep_idx)
+        if len(ts) == 0:
+            shape = self.spec.get("shape", (0, 0, 3))
+            return torch.zeros(3, shape[0], shape[1], dtype=torch.uint8)
+        fps = float(self.spec.get("fps", 30) or 30)
+        idx = int(np.argmin(np.abs(ts - timestamp)))
         from lerobot.datasets.video_utils import decode_video_frames
         frames = decode_video_frames(
-            video_path, [timestamp],
-            tolerance_s=self._tolerance_s, backend=self._backend,
+            video_path, [idx / fps],
+            tolerance_s=max(self._tolerance_s, 0.5 / fps), backend=self._backend,
         )
         return frames.squeeze(0) if isinstance(frames, torch.Tensor) else torch.from_numpy(frames[0])
+
+    def _load_timestamps(self, ep_idx: int) -> np.ndarray:
+        if ep_idx not in self._ts_cache:
+            ep_chunk = ep_idx // self.spec.get("chunks_size", 1000)
+            fpath = self.root / DEFAULT_DATA_PATH.format(
+                episode_chunk=ep_chunk, episode_index=ep_idx, feature_key=self.key,
+            )
+            if fpath.exists():
+                table = pq.read_table(fpath)
+                self._ts_cache[ep_idx] = (
+                    table.column("timestamp").to_numpy()
+                    if len(table) else np.array([], dtype=np.float64)
+                )
+            else:
+                self._ts_cache[ep_idx] = np.array([], dtype=np.float64)
+        return self._ts_cache[ep_idx]

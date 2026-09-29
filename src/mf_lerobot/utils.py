@@ -13,6 +13,9 @@ DEFAULT_INDEX_PATH = "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}
 # Video path
 DEFAULT_VIDEO_PATH = "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
 
+# Audio path
+DEFAULT_AUDIO_PATH = "audios/chunk-{episode_chunk:03d}/{audio_key}/episode_{episode_index:06d}.wav"
+
 # Info / stats paths
 INFO_PATH = "meta/info.json"
 STATS_PATH = "meta/stats.json"
@@ -117,6 +120,7 @@ def create_empty_dataset_info(
         "data_path": DEFAULT_DATA_PATH,
         "index_path": DEFAULT_INDEX_PATH,
         "video_path": DEFAULT_VIDEO_PATH if use_videos else None,
+        "audio_path": DEFAULT_AUDIO_PATH,
         "features": features,
     }
 
@@ -142,6 +146,7 @@ def classify_features(
     default_keys = {"timestamp", "frame_index", "episode_index", "index", "task_index"}
 
     camera_keys: set[str] = set()
+    audio_keys: set[str] = set()
     data_keys: set[str] = set()
 
     for key, ft in features.items():
@@ -149,6 +154,8 @@ def classify_features(
             continue
         if ft.get("dtype") in ("video", "image"):
             camera_keys.add(key)
+        elif ft.get("dtype") == "audio":
+            audio_keys.add(key)
         else:
             data_keys.add(key)
 
@@ -156,6 +163,7 @@ def classify_features(
         "default": sorted(default_keys & set(features.keys())),
         "data": sorted(data_keys),
         "camera": sorted(camera_keys),
+        "audio": sorted(audio_keys),
     }
 
 
@@ -201,6 +209,20 @@ def validate_features(features: dict[str, dict]) -> None:
             raise ValueError(
                 f"Feature names should not contain '/'. Found in '{key}'."
             )
+
+        # Audio features: sample_rate is fundamental (timestamps → sample offsets)
+        if ft["dtype"] == "audio":
+            sr = ft.get("sample_rate")
+            if not isinstance(sr, (int, float)) or sr <= 0:
+                raise ValueError(
+                    f"Audio feature '{key}' requires a positive 'sample_rate'."
+                )
+            shape = ft["shape"]
+            if not (1 <= len(shape) <= 2):
+                raise ValueError(
+                    f"Audio feature '{key}' shape must be (n_samples,) or "
+                    f"(n_samples, channels), got {shape}."
+                )
 
         # Validate window if present
         if "window" in ft:

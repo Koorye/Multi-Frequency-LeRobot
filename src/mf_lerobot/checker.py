@@ -8,7 +8,7 @@ import numpy as np
 
 from lerobot.datasets.utils import append_jsonlines
 
-from .utils import DEFAULT_VIDEO_PATH
+from .utils import DEFAULT_AUDIO_PATH, DEFAULT_DATA_PATH, DEFAULT_VIDEO_PATH
 
 
 class DatasetChecker:
@@ -49,6 +49,52 @@ class DatasetChecker:
                 pass
             except Exception as e:
                 print(f"[VIDEO] episode {ep_idx}, '{cam_key}': error — {e}")
+
+    def check_audio_frames(
+        self, ep_idx: int, episode_length: int, frame_records: list[dict[str, Any]]
+    ) -> None:
+        """WAV integrity: chunk count vs index rows, sample count vs summed index."""
+        import wave
+
+        chunks_size = self.ds.meta.info.get("chunks_size", 1000)
+        ep_chunk = ep_idx // chunks_size
+        for audio_key in self._audio_keys():
+            wav_path = self.ds.root / DEFAULT_AUDIO_PATH.format(
+                episode_chunk=ep_chunk, audio_key=audio_key, episode_index=ep_idx
+            )
+            if not wav_path.exists():
+                print(f"[AUDIO] episode {ep_idx}, '{audio_key}': MISSING")
+                continue
+            index_path = self.ds.root / DEFAULT_DATA_PATH.format(
+                episode_chunk=ep_chunk, episode_index=ep_idx, feature_key=audio_key
+            )
+            try:
+                import pyarrow.parquet as pq
+
+                idx_table = pq.read_table(index_path)
+                n_rows = len(idx_table)
+                index_samples = int(
+                    np.sum(idx_table.column("num_samples").to_numpy())
+                )
+                with wave.open(str(wav_path), "rb") as wf:
+                    sample_rate = wf.getframerate()
+                    channels = wf.getnchannels()
+                    n_samples = wf.getnframes()
+                duration_s = n_samples / sample_rate
+                status = "OK" if n_samples == index_samples else (
+                    f"sample count {n_samples} != index total {index_samples}"
+                )
+                print(f"[AUDIO] episode {ep_idx}, '{audio_key}': {status} "
+                      f"({n_rows} chunks, {channels}ch, {sample_rate}Hz, "
+                      f"{duration_s:.2f}s)")
+            except Exception as e:
+                print(f"[AUDIO] episode {ep_idx}, '{audio_key}': error — {e}")
+
+    def _audio_keys(self) -> list[str]:
+        return [
+            key for key, ft in self.ds.meta.features.items()
+            if ft.get("dtype") == "audio"
+        ]
 
     def check_episode_alignment(
         self, ep_idx: int, episode_length: int, frame_records: list[dict[str, Any]]
