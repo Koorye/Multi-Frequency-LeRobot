@@ -137,6 +137,7 @@ input[type=range] { vertical-align: middle; }
     <button data-w="-500,0">-500</button>
     <button data-w="-1000,0">-1000</button>
     <button data-w="-500,500">±500</button>
+    <button data-w="full" title="显示完整 episode（随帧移动）">全段</button>
     <button data-w="0,0">最近</button>
   </span>
   <span id="task-badge">—</span>
@@ -162,6 +163,7 @@ const color = i => `hsl(${(i * 137.508) % 360}, 62%, 60%)`;
 const state = {
   meta: null, ep: 0, frame: 0, playing: false, speed: 1, loop: false,
   w0: -0.033, w1: 0,                    // seconds, relative to current frame
+  full: false,                          // "全段" mode: window spans the episode
   visible: {},                          // key -> null(all) | Set(indices)
   bands: {},                            // key -> bool
   filters: {},                          // key -> {hp,lp,notch,line} (eeg/emg only)
@@ -383,7 +385,7 @@ function buildFiltPanel(f, panel) {
       <button data-f="eeg" title="HP 0.5 / LP 40 / 陷波">EEG</button>
       <button data-f="emg" title="HP 20 / LP 450 / 陷波">EMG</button>
     </span>
-    <span class="meta" style="color:var(--dim);font-size:11px">零相位 (filtfilt)，按整段 episode 滤波</span>`;
+    <span class="meta" style="color:var(--dim);font-size:11px">零相位 (filtfilt)，按整段 episode 滤波；首尾/断点附近为滤波器稳定区，置灰不显示</span>`;
 
   const flt = state.filters[f.key];
   const inp = sel => panel.querySelector(sel);
@@ -470,20 +472,28 @@ function bindControls() {
     if (state.playing) { togglePlay(); togglePlay(); }
   });
   $("#w0-input").addEventListener("change", e => {
+    state.full = false; syncPresetBtns();
     state.w0 = parseInt(e.target.value) / 1000;
     state.w1 = Math.max(state.w1, state.w0 + 0.005);
     syncWindowInputs(); refresh();
   });
   $("#w1-input").addEventListener("change", e => {
+    state.full = false; syncPresetBtns();
     state.w1 = parseInt(e.target.value) / 1000;
     state.w0 = Math.min(state.w0, state.w1 - 0.005);
     syncWindowInputs(); refresh();
   });
   document.querySelectorAll("#presets button").forEach(b => {
     b.addEventListener("click", () => {
-      const [a, c] = b.dataset.w.split(",").map(Number);
-      state.w0 = a / 1000; state.w1 = c / 1000;
-      syncWindowInputs(); refresh();
+      if (b.dataset.w === "full") {
+        state.full = true;                // window spans the episode, follows frame
+      } else {
+        state.full = false;
+        const [a, c] = b.dataset.w.split(",").map(Number);
+        state.w0 = a / 1000; state.w1 = c / 1000;
+        syncWindowInputs();
+      }
+      syncPresetBtns(); refresh();
     });
   });
   window.addEventListener("keydown", onKey);
@@ -553,12 +563,23 @@ function syncWindowInputs() {
   $("#w0-input").value = Math.round(state.w0 * 1000);
   $("#w1-input").value = Math.round(state.w1 * 1000);
 }
+function syncPresetBtns() {
+  const fb = document.querySelector('#presets button[data-w="full"]');
+  if (fb) fb.classList.toggle("active", !!state.full);
+}
 
 async function refresh(forceVideo) {
   if (state.refreshing) { state.refreshQueued = true; return; }
   state.refreshing = true;
   try {
     const seq = ++state.refreshSeq;
+    if (state.full) {
+      // window covers the whole episode, anchored to the current frame
+      const fps = state.meta.fps || 30;
+      state.w0 = -(state.frame / fps) - 0.01;
+      state.w1 = (epLength() - state.frame) / fps + 0.01;
+      syncWindowInputs();
+    }
     const cols = [];
     for (const f of state.meta.features) {
       if (f.kind !== "parquet") continue;
@@ -978,6 +999,7 @@ function onDragMove(e) {
   const d = state.dragging;
   if (!d) return;
   const t = d.tAt(e.clientX - d.rect.left);
+  if (state.full) { state.full = false; syncPresetBtns(); }
   if (d.handle === "w0") state.w0 = Math.min(t, state.w1 - 0.005);
   else state.w1 = Math.max(t, state.w0 + 0.005);
   syncWindowInputs();
