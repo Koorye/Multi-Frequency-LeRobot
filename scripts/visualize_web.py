@@ -236,7 +236,8 @@ class DatasetApp:
                 self._filt_cache.move_to_end(ck)
                 return self._filt_cache[ck]
         feat = self.ds._features.get(key)
-        fs_hint = float(feat.spec.get("fps") or 0) if feat is not None else None
+        fs_hint = float(feat.spec.get("fps") or feat.spec.get("sample_rate") or 0) \
+            if feat is not None else None
         fts, vals = feat.load(ep)
         fts, vals = bandpass_filter(fts, vals, filt, fs_hint)
         with self._lock:
@@ -382,14 +383,18 @@ class DatasetApp:
             shape = list(ft.get("shape", []))
             names = ft.get("names")
             if names is None and shape:
-                names = [f"dim_{i}" for i in range(shape[0])]
+                if ft.get("dtype") == "audio":
+                    # shape is (n_samples[, channels]) — channels are the value columns
+                    names = [f"ch_{i}" for i in range(shape[1] if len(shape) > 1 else 1)]
+                else:
+                    names = [f"dim_{i}" for i in range(shape[0])]
             features.append({
                 "key": key,
                 "kind": kind,
                 "shape": shape,
                 "names": names,
                 "window": list(ft["window"]) if ft.get("window") else None,
-                "fps": ft.get("fps"),
+                "fps": ft.get("fps") or ft.get("sample_rate"),
             })
         return {
             "name": self.ds.repo_id,
