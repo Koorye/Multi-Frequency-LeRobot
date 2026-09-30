@@ -26,6 +26,7 @@ class ParquetFeature:
         self._window_override = window_override
         self._ep_idx = 0
         self.buffer: list[tuple[float, np.ndarray]] = []
+        self._stacked: np.ndarray | None = None
         self._cache: dict[int, tuple[np.ndarray, np.ndarray]] = {}
 
     # ── Write ──
@@ -36,11 +37,20 @@ class ParquetFeature:
         self.buffer.append((timestamp, value))
         return timestamp
 
+    def _stacked_values(self) -> np.ndarray:
+        """Stack the buffered samples once; save() and compute_stats() share it.
+
+        The buffer is append-only, so its length validates the cache. Avoids
+        copying the full episode values twice per save."""
+        if self._stacked is None or len(self._stacked) != len(self.buffer):
+            self._stacked = np.stack([s[1] for s in self.buffer], axis=0)
+        return self._stacked
+
     def save(self, chunks_size: int = 1000) -> dict[str, int | float]:
         if not self.buffer:
             return {}
         timestamps = np.array([s[0] for s in self.buffer], dtype=np.float64)
-        values = np.stack([s[1] for s in self.buffer], axis=0)
+        values = self._stacked_values()
 
         ep_chunk = self._ep_idx // chunks_size
         fpath = self.root / DEFAULT_DATA_PATH.format(
@@ -66,7 +76,7 @@ class ParquetFeature:
     def compute_stats(self) -> dict | None:
         if not self.buffer:
             return None
-        vals = np.stack([s[1] for s in self.buffer], axis=0)
+        vals = self._stacked_values()
         return {
             "min": vals.min(axis=0), "max": vals.max(axis=0),
             "mean": vals.mean(axis=0), "std": vals.std(axis=0),
@@ -76,6 +86,7 @@ class ParquetFeature:
     def next_episode(self):
         self._ep_idx += 1
         self.buffer = []
+        self._stacked = None
 
     # ── Read ──
 

@@ -11,6 +11,25 @@ from lerobot.datasets.utils import append_jsonlines
 from .utils import DEFAULT_AUDIO_PATH, DEFAULT_DATA_PATH, DEFAULT_VIDEO_PATH
 
 
+def _nearest_indices(ts: np.ndarray, master_ts: np.ndarray) -> np.ndarray:
+    """Index in ``ts`` nearest to each master timestamp.
+
+    Vectorised searchsorted equivalent of ``np.argmin(np.abs(ts - mt))``
+    per frame, which rescans the whole axis for every master frame —
+    O(frames × readings) and dominant for high-rate streams. Timestamps
+    are recorded monotonically, as the readers already assume. Ties
+    resolve to the earlier sample, matching argmin's first-minimum.
+    With duplicated timestamps the picked index may differ from argmin's
+    (a later copy of the same value), but the timestamp value and diff —
+    all the report uses — are identical.
+    """
+    if len(ts) == 1:
+        return np.zeros(len(master_ts), dtype=np.int64)
+    hi = np.clip(np.searchsorted(ts, master_ts, side="left"), 1, len(ts) - 1)
+    pick_right = np.abs(ts[hi] - master_ts) < np.abs(master_ts - ts[hi - 1])
+    return np.where(pick_right, hi, hi - 1)
+
+
 class DatasetChecker:
     """Validates saved episodes: video integrity and timestamp alignment."""
 
@@ -118,18 +137,17 @@ class DatasetChecker:
             if len(ts) == 0:
                 continue
 
-            violations = []
-            for frame_i in range(episode_length):
-                mt = master_ts[frame_i]
-                idx = np.argmin(np.abs(ts - mt))
-                diff = float(abs(ts[idx] - mt))
-                if diff > tolerance:
-                    violations.append({
-                        "frame": frame_i,
-                        "t_master": round(float(mt), 6),
-                        "t_nearest": round(float(ts[idx]), 6),
-                        "diff": round(diff, 6),
-                    })
+            idx = _nearest_indices(ts, master_ts)
+            diffs = np.abs(ts[idx] - master_ts)
+            violations = [
+                {
+                    "frame": int(fi),
+                    "t_master": round(float(master_ts[fi]), 6),
+                    "t_nearest": round(float(ts[idx[fi]]), 6),
+                    "diff": round(float(diffs[fi]), 6),
+                }
+                for fi in np.nonzero(diffs > tolerance)[0]
+            ]
 
             if violations:
                 report = {
@@ -139,9 +157,7 @@ class DatasetChecker:
                     "total_frames": episode_length,
                     "total_readings": len(ts),
                     "violations": len(violations),
-                    "max_diff": round(
-                        float(max(abs(ts[np.argmin(np.abs(ts - mt))] - mt)
-                                  for mt in master_ts)), 6),
+                    "max_diff": round(float(diffs.max()), 6),
                     "details": violations,
                 }
                 report_path.parent.mkdir(parents=True, exist_ok=True)

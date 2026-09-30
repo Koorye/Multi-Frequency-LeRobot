@@ -8,6 +8,7 @@ microphones by AudioFeature.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -43,6 +44,7 @@ class MultiFrequencyLeRobotDataset(LeRobotDataset):
         video_backend: str | None = None,
         batch_encoding_size: int = 1,
         window_overrides: dict[str, tuple | str | None] | None = None,
+        save_threads: int = 1,
     ):
         self.root = Path(root) if root else (
             Path.home() / ".cache" / "huggingface" / "lerobot" / repo_id
@@ -54,6 +56,7 @@ class MultiFrequencyLeRobotDataset(LeRobotDataset):
         self.delta_timestamps = delta_timestamps
         self.batch_encoding_size = batch_encoding_size
         self.episodes_since_last_encoding = 0
+        self.save_threads = max(1, int(save_threads))
 
         self.meta = MultiFrequencyDatasetMetadata(self.repo_id, self.root)
         self.index = MasterIndex(self)
@@ -122,6 +125,7 @@ class MultiFrequencyLeRobotDataset(LeRobotDataset):
         video_backend: str | None = None,
         batch_encoding_size: int = 1,
         window_overrides: dict[str, tuple | str | None] | None = None,
+        save_threads: int = 1,
     ) -> "MultiFrequencyLeRobotDataset":
         root = Path(root) if root else (
             Path.home() / ".cache" / "huggingface" / "lerobot" / repo_id
@@ -142,6 +146,7 @@ class MultiFrequencyLeRobotDataset(LeRobotDataset):
         obj.delta_indices = None
         obj.batch_encoding_size = batch_encoding_size
         obj.episodes_since_last_encoding = 0
+        obj.save_threads = max(1, int(save_threads))
         obj.image_writer = None
         if image_writer_processes or image_writer_threads:
             obj.start_image_writer(image_writer_processes, image_writer_threads)
@@ -256,27 +261,46 @@ class MultiFrequencyLeRobotDataset(LeRobotDataset):
         # Write index
         index_table = self.index.write(ep_idx)
 
-        # Save all features
+        # Save all features — one worker per feature when save_threads > 1:
+        # each feature writes its own files with no shared state, and parquet
+        # compression / WAV encoding release the GIL, so a thread pool
+        # overlaps the per-feature work (a process pool would pickle the
+        # full buffers, costing more than the save itself). Stats run on the
+        # same worker right after the save to reuse the values array save()
+        # already stacked.
         chunks_size = self.meta.info.get("chunks_size", 1000)
-        has_video = False
-        has_audio = False
-        for f in self._features.values():
+        features = list(self._features.values())
+
+        def _save_and_stats(f):
             if isinstance(f, ParquetFeature):
                 f.save(chunks_size)
-            elif isinstance(f, VideoFeature):
+                return "data", f.compute_stats()
+            if isinstance(f, VideoFeature):
                 f.save()
-                has_video = True
-            elif isinstance(f, AudioFeature):
+                return "video", f.compute_stats()
+            if isinstance(f, AudioFeature):
                 f.save()
-                has_audio = True
+                return "audio", f.compute_stats()
+            return None, None
+
+        if self.save_threads > 1 and len(features) > 1:
+            with ThreadPoolExecutor(
+                    max_workers=min(self.save_threads, len(features))) as pool:
+                results = list(pool.map(_save_and_stats, features))
+        else:
+            results = [_save_and_stats(f) for f in features]
+
+        kinds = [kind for kind, _ in results]
+        has_video = "video" in kinds
+        has_audio = "audio" in kinds
 
         if has_video and ep_idx == 0:
             self.meta.update_video_info()
 
-        # Stats + metadata
+        # Stats + metadata — pool.map preserves submission order, so ep_stats
+        # ends up in _features order exactly as when saving serially
         ep_stats = {}
-        for f in self._features.values():
-            s = f.compute_stats()
+        for f, (_, s) in zip(features, results):
             if s:
                 ep_stats[f.key] = s
         self.meta.save_episode(ep_idx, episode_length, episode_tasks, ep_stats)
