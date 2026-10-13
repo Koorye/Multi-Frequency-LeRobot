@@ -83,6 +83,26 @@ section h2 {
 .filt-panel .presets { display: flex; gap: 4px; }
 .filt-panel .presets button { padding: 1px 7px; font-size: 11px; }
 .filt-badge { color: var(--warn); }
+/* static value grid (single-row snapshot features, e.g. eeg_impedance) */
+.val-wrap { margin-top: 6px; }
+.val-grid { display: flex; flex-wrap: wrap; gap: 2px; }
+.val-cell {
+  width: 40px; height: 20px; border-radius: 3px; display: flex;
+  align-items: center; justify-content: center; font-size: 9px;
+  color: #0d1117; cursor: default; overflow: hidden; font-weight: bold;
+}
+.val-cell.nan { background: #30363d; color: var(--dim); }
+.val-legend { display: flex; gap: 12px; font-size: 11px; color: var(--dim); padding: 5px 2px 0; flex-wrap: wrap; }
+.val-legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; margin-right: 4px; }
+/* 3D pose view */
+.pose3d-wrap { position: relative; }
+#pose3d-canvas { display: block; width: 100%; border-radius: 6px; background: #0a0e14; cursor: grab; }
+.pose3d-legend { position: absolute; top: 6px; left: 10px; font-size: 11px; color: var(--dim); pointer-events: none; line-height: 1.6; }
+#track-win {
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 4px; padding: 1px 4px; font: inherit; font-size: 11px;
+  text-transform: none; letter-spacing: 0; margin-left: 10px; vertical-align: 1px;
+}
 .plot-wrap { position: relative; margin-top: 4px; }
 .plot-wrap canvas { display: block; width: 100%; border-radius: 4px; }
 .tooltip {
@@ -148,6 +168,23 @@ input[type=range] { vertical-align: middle; }
     <h2>📷 相机 (点击放大)</h2>
     <div id="cameras"></div>
   </section>
+  <section id="pose3d-section" hidden>
+    <h2>🧭 3D 姿态 (拖动旋转 · 滚轮缩放 · 双击复位)
+      <select id="track-win" title="轨迹历史长度">
+        <option value="2">过去 2s</option>
+        <option value="5" selected>过去 5s</option>
+        <option value="10">过去 10s</option>
+        <option value="30">过去 30s</option>
+        <option value="Infinity">全程轨迹</option>
+      </select>
+      <label style="text-transform:none;letter-spacing:0;font-size:11px;margin-left:8px">
+        <input type="checkbox" id="show-hands"> 手骨架</label>
+    </h2>
+    <div class="pose3d-wrap">
+      <canvas id="pose3d-canvas" style="height:420px"></canvas>
+      <div class="pose3d-legend" id="pose3d-legend"></div>
+    </div>
+  </section>
   <section id="strips-section">
     <h2>📈 传感器 (拖拽橙色窗口边缘调整时间窗)</h2>
     <div id="strips"></div>
@@ -170,6 +207,11 @@ const state = {
   stats: {},                            // ep -> {key: {min,max,mean,std}}
   camsOn: {},                           // key -> bool (camera fetch enabled)
   indY: {},                             // key -> bool (per-channel y scale)
+  staticVals: {},                       // static feature key -> value array (this episode)
+  track: null,                          // whole-episode 3D paths (/api/track)
+  trackWin: 5,                          // seconds of trail history (Infinity = full)
+  showHands: false,                     // hand skeletons off until mapping is confirmed
+  cam3d: { yaw: -0.85, pitch: 0.42, dist: 0, auto: true },
   data: null, refreshSeq: 0, timer: null, dragging: null,
   refreshing: false, refreshQueued: false, lastCamFrame: -1,
 };
@@ -248,6 +290,30 @@ function buildStrips(meta) {
     const el = document.createElement("div");
     el.className = "strip";
     el.dataset.key = cssKey(f.key);
+
+    if (f.static) {
+      // single-row snapshot (e.g. eeg_impedance): color-coded value grid,
+      // a time plot is meaningless for constants
+      el.innerHTML = `
+        <div class="strip-head">
+          <span class="key">${f.key}</span>
+          <span class="meta">静态快照 · ${n} 通道</span>
+          <span class="meta static-summary"></span>
+          <span class="spacer"></span>
+          <button class="btn-fold">−</button>
+        </div>
+        <div class="val-wrap"><div class="val-grid"></div>
+          <div class="val-legend"></div></div>`;
+      el.querySelector(".btn-fold").addEventListener("click", ev => {
+        const w = el.querySelector(".val-wrap");
+        const hidden = w.style.display === "none";
+        w.style.display = hidden ? "" : "none";
+        ev.target.textContent = hidden ? "−" : "+";
+      });
+      box.appendChild(el);
+      continue;
+    }
+
     const h = Math.max(110, Math.min(260, 70 + n * 1.9));
     el.innerHTML = `
       <div class="strip-head">
@@ -303,6 +369,7 @@ function buildStrips(meta) {
     canvas.addEventListener("mouseleave", () => $("#tooltip").style.display = "none");
     box.appendChild(el);
   }
+  setup3D(meta);
 }
 
 function buildChanPanel(f, panel) {
@@ -550,7 +617,93 @@ async function selectEpisode(i) {
     const s = await api(`/api/stats?ep=${i}`);
     if (!s.error) state.stats[i] = s;
   }
+  fetchStatic(i);
+  fetchTrack(i);
   refresh();
+}
+
+async function fetchTrack(ep) {
+  state.track = null;
+  const t = await api(`/api/track?ep=${ep}`);
+  if (!t.error) { state.track = t; requestRender(); }
+}
+
+// ── static snapshot features (e.g. eeg_impedance) ───────────────────────
+
+async function fetchStatic(ep) {
+  state.staticVals = {};
+  const keys = state.meta.features.filter(f => f.kind === "parquet" && f.static).map(f => f.key);
+  if (!keys.length) return;
+  const qs = new URLSearchParams({ ep, f: 0, w0: 0, w1: 0, cols: keys.map(k => `${k}:*`).join(";") });
+  const d = await api(`/api/frame?${qs}`);
+  if (d.error) return;
+  for (const k of keys) {
+    const s = d.samples[k];
+    if (s && s.values.length) state.staticVals[k] = s.values[0];
+  }
+  requestRender();
+}
+
+// impedance quality bands (kΩ): green <5, yellow <10, orange <50, red ≥50
+const IMPEDANCE_BANDS = [
+  { max: 5,     color: "#2ea043", label: "优" },
+  { max: 10,    color: "#d29922", label: "良" },
+  { max: 50,    color: "#f0883e", label: "差" },
+  { max: Infinity, color: "#f85149", label: "坏" },
+];
+
+function renderStaticGrids() {
+  for (const f of state.meta.features) {
+    if (!f.static) continue;
+    const el = document.querySelector(`.strip[data-key="${cssKey(f.key)}"]`);
+    if (!el) continue;
+    const grid = el.querySelector(".val-grid");
+    if (grid.dataset.done) continue;
+    const vals = state.staticVals ? state.staticVals[f.key] : null;
+    if (!vals) continue;
+    grid.dataset.done = "1";
+
+    const isImp = /impedance/i.test(f.key);
+    // auto unit: medians ≫ 1000 mean the values are already in kΩ
+    const fin = vals.filter(v => v !== null && isFinite(v));
+    const med = fin.length ? fin.slice().sort((a, b) => a - b)[fin.length >> 1] : 0;
+    const inKOhm = isImp && med < 1000;
+    const toK = v => inKOhm ? v : v / 1000;
+
+    let counts = IMPEDANCE_BANDS.map(() => 0);
+    let html = "";
+    f.names.forEach((nm, i) => {
+      const v = vals[i];
+      if (v === null || v === undefined || !isFinite(v)) {
+        html += `<div class="val-cell nan" title="${nm}: NaN">${nm.slice(0, 5)}</div>`;
+        return;
+      }
+      let band = IMPEDANCE_BANDS[IMPEDANCE_BANDS.length - 1], bi = counts.length - 1;
+      if (isImp) {
+        bi = IMPEDANCE_BANDS.findIndex(b => toK(v) < b.max);
+        bi = bi < 0 ? counts.length - 1 : bi;
+        band = IMPEDANCE_BANDS[bi];
+      }
+      counts[bi]++;
+      const fmtV = isImp ? fmtVal(toK(v)) + " kΩ" : fmtVal(v);
+      const cellStyle = isImp ? `background:${band.color}` : "";
+      html += `<div class="val-cell" style="${cellStyle}" title="${nm}: ${fmtV}">${nm.slice(0, 5)}</div>`;
+    });
+    grid.innerHTML = html;
+
+    const legend = el.querySelector(".val-legend");
+    if (isImp) {
+      legend.innerHTML = IMPEDANCE_BANDS.map((b, i) =>
+        `<span><span class="sw" style="background:${b.color}"></span>${b.label} &lt;${b.max === Infinity ? "∞" : b.max}kΩ ×${counts[i]}</span>`
+      ).join("") + `<span>单位${inKOhm ? "kΩ" : "Ω→kΩ"} · 中位 ${fmtVal(toK(med))} kΩ</span>`;
+      const good = counts[0] + counts[1];
+      el.querySelector(".static-summary").textContent =
+        `${good}/${f.names.length} 通道可用 (≤10kΩ)`;
+    } else {
+      legend.textContent = "静态快照";
+      el.querySelector(".static-summary").textContent = `${f.names.length} 值`;
+    }
+  }
 }
 
 function syncControls() {
@@ -667,6 +820,7 @@ function renderStrips() {
     const el = document.querySelector(`.strip[data-key="${cssKey(f.key)}"]`);
     if (!el) continue;
     const cv = el.querySelector(".plot");
+    if (!cv) continue;                 // static grid strips have no canvas
     const samples = state.data ? state.data.samples[f.key] : null;
     const vis = state.visible[f.key];
     // episode stats describe the RAW signal — they would mis-scale a
@@ -675,9 +829,12 @@ function renderStrips() {
     const bands = (!filtered && state.bands[f.key])
       ? (state.stats[state.ep] || {})[f.key] : null;
     drawPlot(cv, f, samples, vis, bands);
-    el.querySelector(".count").textContent = samples
+    const cnt = el.querySelector(".count");
+    if (cnt) cnt.textContent = samples
       ? `${samples.ts.length} 样本${filtered ? " · 滤波后" : ""}` : "无样本";
   }
+  renderStaticGrids();
+  render3D();
 }
 
 function drawPlot(cv, f, samples, vis, bands) {
@@ -1012,6 +1169,377 @@ function onDragEnd() {
   window.removeEventListener("mousemove", onDragMove);
   window.removeEventListener("mouseup", onDragEnd);
   refresh();
+}
+
+// ── 3D pose view ─────────────────────────────────────────────────────────
+
+// two 25-node hands: root + 5 finger chains (Manus-style layout, verified
+// against constant bone lengths in the recorded skeleton)
+const HAND_CHAINS = [[1, 2, 3, 4], [5, 6, 7, 8, 9], [10, 11, 12, 13, 14],
+                     [15, 16, 17, 18, 19], [20, 21, 22, 23, 24]];
+
+function poseFeaturesOf(meta) {
+  return meta.features.filter(f => f.kind === "parquet" && !f.static
+    && f.shape.length === 1 && f.shape[0] === 6
+    && f.names && f.names.join(",") === "x,y,z,roll,pitch,yaw");
+}
+function skeletonFeatureOf(meta) {
+  return meta.features.find(f => f.kind === "parquet" && !f.static
+    && /skeleton/i.test(f.key) && f.shape.length === 1 && f.shape[0] % 6 === 0);
+}
+function shortName(key) { return key.replace(/^observation\./, "").replace(/_pose$/, ""); }
+function poseColor(name) {
+  if (/^left/.test(name)) return "#58a6ff";
+  if (/^right/.test(name)) return "#f778ba";
+  if (/chest/.test(name)) return "#d29922";
+  let h = 0;
+  for (const c of name) h = (h * 31 + c.charCodeAt(0)) % 360;
+  return `hsl(${h}, 65%, 60%)`;
+}
+
+function setup3D(meta) {
+  const sec = $("#pose3d-section");
+  const poses = poseFeaturesOf(meta);
+  const skel = skeletonFeatureOf(meta);
+  if (!poses.length && !skel) { sec.hidden = true; return; }
+  sec.hidden = false;
+  $("#pose3d-legend").innerHTML =
+    poses.map(f => { const n = shortName(f.key); return `<span style="color:${poseColor(n)}">■</span> ${n}`; }).join(" &nbsp; ")
+    + (skel ? ` &nbsp; <span style="color:#7ee787">🖐</span> 手部骨架` : "")
+    + ` &nbsp; <span style="color:#8b949e">SteamVR 右手系 · Y 朝上 · 轨迹随时间渐亮</span>`;
+
+  const cv = $("#pose3d-canvas");
+  let drag = null;
+  cv.addEventListener("mousedown", e => {
+    drag = { x: e.clientX, y: e.clientY };
+    cv.style.cursor = "grabbing";
+    e.preventDefault();
+  });
+  window.addEventListener("mousemove", e => {
+    if (!drag) return;
+    state.cam3d.yaw += (e.clientX - drag.x) * 0.008;
+    state.cam3d.pitch = clamp(state.cam3d.pitch + (e.clientY - drag.y) * 0.008, -1.5, 1.5);
+    drag = { x: e.clientX, y: e.clientY };
+    state.cam3d.auto = false;
+    requestRender();
+  });
+  window.addEventListener("mouseup", () => { drag = null; cv.style.cursor = "grab"; });
+  cv.addEventListener("wheel", e => {
+    e.preventDefault();
+    state.cam3d.dist *= e.deltaY > 0 ? 1.12 : 1 / 1.12;
+    state.cam3d.auto = false;
+    requestRender();
+  }, { passive: false });
+  cv.addEventListener("dblclick", () => {
+    Object.assign(state.cam3d, { yaw: -0.85, pitch: 0.42, dist: 0, auto: true });
+    requestRender();
+  });
+  const tw = $("#track-win");
+  if (tw) tw.addEventListener("change", e => {
+    state.trackWin = parseFloat(e.target.value);
+    requestRender();
+  });
+  const sh = $("#show-hands");
+  if (sh) sh.addEventListener("change", e => {
+    state.showHands = e.target.checked;
+    requestRender();
+  });
+}
+
+// (roll, pitch, yaw) -> rotation, EXACTLY as saved by the recorder: the
+// pose comes from OpenVR mDeviceToAbsoluteTracking (SteamVR right-handed
+// y-up world) and euler_rpy_deg is the standard ZYX decomposition of it:
+//   R = Rz(yaw) · Ry(pitch) · Rx(roll)     (right-handed, positive angles)
+function eulerDeg(roll, pitch, yaw) {
+  const r = roll * Math.PI / 180, p = pitch * Math.PI / 180, y = yaw * Math.PI / 180;
+  const cr = Math.cos(r), sr = Math.sin(r), cp = Math.cos(p), sp = Math.sin(p);
+  const cy = Math.cos(y), sy = Math.sin(y);
+  const Rx = [[1, 0, 0], [0, cr, -sr], [0, sr, cr]];
+  const Ry = [[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]];
+  const Rz = [[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]];
+  return matMul(matMul(Rz, Ry), Rx);
+}
+const matMul = (A, B) => A.map((row, i) => B[0].map((_, j) =>
+  row.reduce((s, a, k) => s + a * B[k][j], 0)));
+// Manus-skeleton → wrist-tracker mount mapping (user-verified):
+// tracker convention +z = finger, +y = back of the hand; the base maps the
+// measured data axes onto it, then per-hand fixes apply — left hand spins
+// 180° about z (its back faced -y), both hands mirror across yz (thumb
+// side). det = +1 for both.
+const HAND_FIX = {
+  left: [[1, 0, 0], [0, -1, 0], [0, 0, 1]],     // Rz(180°) ∘ yz-mirror
+  right: [[-1, 0, 0], [0, 1, 0], [0, 0, 1]],    // yz-mirror
+};
+const HAND_C_BASE = {
+  left: [[-0.2705, 0.9583, -0.0925], [0.0951, -0.069, -0.9931], [0.958, 0.2774, 0.0725]],
+  right: [[-0.2723, -0.9589, -0.0796], [-0.0949, -0.0556, 0.9939], [0.9575, -0.2782, 0.0758]],
+};
+const HAND_C = {
+  left: matMul(HAND_FIX.left, HAND_C_BASE.left),
+  right: matMul(HAND_FIX.right, HAND_C_BASE.right),
+};
+// the tracker sits ~5cm above the midpoint between the palm root and the
+// middle-finger MCP: world = R_pose·(C·local + OFFSET) + wrist, with
+// OFFSET = (0,-0.05,0) − C·p_ref  (p_ref = that midpoint in data coords)
+const HAND_OFFSET = {
+  left: [0.0059, -0.0519, -0.048],
+  right: [-0.0059, -0.0518, -0.048],
+};
+const mulMatVec = (R, v) => [
+  R[0][0] * v[0] + R[0][1] * v[1] + R[0][2] * v[2],
+  R[1][0] * v[0] + R[1][1] * v[1] + R[1][2] * v[2],
+  R[2][0] * v[0] + R[2][1] * v[1] + R[2][2] * v[2],
+];
+
+function render3D() {
+  const sec = $("#pose3d-section");
+  if (!sec || sec.hidden) return;
+  const cv = $("#pose3d-canvas");
+  const ctx = cv.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth || 800, H = cv.clientHeight || 420;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) {
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = "#0a0e14"; ctx.fillRect(0, 0, W, H);
+  if (!state.data) return;
+
+  const poses = poseFeaturesOf(state.meta);
+  const skel = skeletonFeatureOf(state.meta);
+  const prims = [];   // depth-sorted drawables (hands, triads)
+  const curPose = {};  // short name -> {pos, rot}
+  const track = state.track || {};   // whole-episode paths (/api/track)
+  const tNow = state.data ? state.data.timestamp : null;
+
+  // current-frame pose triads (last sample in the window)
+  for (const f of poses) {
+    const s = state.data.samples[f.key];
+    if (!s || !s.ts.length) continue;
+    const name = shortName(f.key);
+    let row = null;
+    for (let i = s.values.length - 1; i >= 0; i--) {
+      const v = s.values[i];
+      if (v && v.slice(0, 6).every(x => x !== null && isFinite(x))) { row = v; break; }
+    }
+    if (!row) continue;
+    curPose[name] = { pos: [row[0], row[1], row[2]], rot: eulerDeg(row[3], row[4], row[5]) };
+  }
+
+  // hand skeletons, attached to matching wrist poses when present
+  const handPts = [];
+  if (skel && state.showHands) {
+    const s = state.data.samples[skel.key];
+    if (s && s.ts.length) {
+      const v = s.values[s.values.length - 1];
+      if (v && v.length % 6 === 0) {
+        const twoHands = v.length === 300;   // 50 nodes = left(25) + right(25)
+        const per = twoHands ? 25 : v.length / 6;
+        for (let h = 0; h < (twoHands ? 2 : 1); h++) {
+          const side = twoHands ? (h === 0 ? "left" : "right") : "";
+          const local = [];
+          for (let i = 0; i < per; i++) {
+            const o = (h * per + i) * 6;
+            local.push([v[o], v[o + 1], v[o + 2]]);
+          }
+          const poseKey = side ? Object.keys(curPose).find(k => k.startsWith(side)) : null;
+          const attach = poseKey ? curPose[poseKey] : null;
+          // world = R_pose · (C·local + mount offset) + wrist pos
+          const C = side ? HAND_C[side] : null;
+          const rot = attach && C ? matMul(attach.rot, C) : attach ? attach.rot : null;
+          const off = side === "left" ? [-0.15, 0, 0] : [0.15, 0, 0];
+          const nodes = local.map(p => rot
+            ? mulMatVec(attach.rot, mulMatVec(C, p).map((c, i) => c + HAND_OFFSET[side][i]))
+                .map((c, i) => c + attach.pos[i])
+            : p.map((c, i) => c + off[i]));
+          handPts.push(...nodes);
+          const color = side === "left" ? "#58a6ff" : side === "right" ? "#f778ba" : "#7ee787";
+          prims.push({ hand: { nodes, color } });
+        }
+      }
+    }
+  }
+
+  // clip tracks to the recent-history window before the current frame
+  // (state.trackWin seconds; Infinity = whole episode) — keeps the view
+  // focused and the line count low
+  const idxNear = (ts, t) => {
+    if (t === null || !ts.length) return -1;
+    let a = 0, b = ts.length - 1;
+    while (a < b) { const m = (a + b) >> 1; if (ts[m] < t) a = m + 1; else b = m; }
+    if (a > 0 && Math.abs(ts[a - 1] - t) <= Math.abs(ts[a] - t)) a--;
+    return a;
+  };
+  const trackWin = state.trackWin ?? 5;
+  const visTracks = [];
+  for (const [key, tr] of Object.entries(track)) {
+    if (!tr || !tr.ts || !tr.ts.length) continue;
+    if (key.includes("|tips_")) continue;   // fingertip paths not drawn
+    const allPaths = [tr.xyz];
+    if (!allPaths || !allPaths[0] || !allPaths[0].length) continue;
+    const iNow = idxNear(tr.ts, tNow);
+    if (iNow < 0) continue;
+    let i0 = 0;
+    if (isFinite(trackWin)) {
+      const tLo = (tNow ?? tr.ts[iNow]) - trackWin;
+      while (i0 < iNow && tr.ts[i0] < tLo) i0++;
+    }
+    const paths = allPaths.map(p => p.slice(i0, iNow + 1)).filter(p => p.length > 1);
+    if (!paths.length) continue;
+    visTracks.push({
+      key, isTips: false, paths,
+      baseColor: poseColor(shortName(key)),
+    });
+  }
+
+  // scene bounds from the visible (windowed) tracks + current hands
+  const pts3 = handPts.slice();
+  for (const vt of visTracks) for (const path of vt.paths) pts3.push(...path);
+  if (!pts3.length && !Object.keys(curPose).length) {
+    ctx.fillStyle = "#4a5568"; ctx.font = "12px monospace";
+    ctx.fillText("当前帧无 pose 样本", 12, 20);
+    return;
+  }
+  if (!pts3.length) for (const cp of Object.values(curPose)) pts3.push(cp.pos);
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (const p of pts3) for (let i = 0; i < 3; i++) { if (p[i] < lo[i]) lo[i] = p[i]; if (p[i] > hi[i]) hi[i] = p[i]; }
+  const center = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
+  const radius = Math.max(0.15, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) / 2);
+  const cam = state.cam3d;
+  if (cam.auto || !cam.dist) cam.dist = radius * 3.2;
+
+  // left-handed world, y up: yaw orbits about y, pitch tilts the camera
+  const cyw = Math.cos(cam.yaw), syw = Math.sin(cam.yaw);
+  const cpt = Math.cos(cam.pitch), spt = Math.sin(cam.pitch);
+  const proj = p => {
+    const x = p[0] - center[0], y = p[1] - center[1], z = p[2] - center[2];
+    const x1 = cyw * x + syw * z, z1 = -syw * x + cyw * z;
+    const y2 = cpt * y - spt * z1, z2 = spt * y + cpt * z1;   // y2 up, z2 depth
+    const d = cam.dist - z2;
+    if (d < 0.02) return null;
+    const fl = H * 1.15;
+    return [W / 2 + fl * x1 / d, H / 2 - fl * y2 / d, d];
+  };
+  const depthOf = p => {
+    const x = p[0] - center[0], y = p[1] - center[1], z = p[2] - center[2];
+    const z1 = -syw * x + cyw * z;
+    return cam.dist - (spt * y + cpt * z1);
+  };
+
+  // ground grid (y = 0, the XZ plane), sized to the scene
+  const gstep = 0.1;
+  const gx0 = Math.floor(lo[0] / gstep) * gstep, gx1 = Math.ceil(hi[0] / gstep) * gstep;
+  const gz0 = Math.floor(lo[2] / gstep) * gstep, gz1 = Math.ceil(hi[2] / gstep) * gstep;
+  ctx.strokeStyle = "#1c2229"; ctx.lineWidth = 1;
+  for (let gx = gx0; gx <= gx1 + 1e-9; gx += gstep) {
+    const a = proj([gx, 0, gz0]), b = proj([gx, 0, gz1]);
+    if (a && b) { ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke(); }
+  }
+  for (let gz = gz0; gz <= gz1 + 1e-9; gz += gstep) {
+    const a = proj([gx0, 0, gz]), b = proj([gx1, 0, gz]);
+    if (a && b) { ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke(); }
+  }
+
+  // world axes at origin (y up)
+  for (const [ax, col, lab] of [[[0.1, 0, 0], "#f85149", "X"], [[0, 0.1, 0], "#3fb950", "Y"], [[0, 0, 0.1], "#58a6ff", "Z"]]) {
+    const a = proj([0, 0, 0]), b = proj(ax);
+    if (a && b) {
+      ctx.strokeStyle = col; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+      ctx.fillStyle = col; ctx.font = "10px monospace";
+      ctx.fillText(lab, b[0] + 2, b[1]);
+    }
+  }
+
+  // windowed trajectories, age-faded within the window; marker at the newest point
+  const BUCKETS = 24;
+  for (const vt of visTracks) {
+    const { isTips, baseColor } = vt;
+    for (const path of vt.paths) {
+      // batch segments into age buckets so fading costs BUCKETS strokes
+      for (let b = 0; b < BUCKETS; b++) {
+        const i0 = Math.floor(b * (path.length - 1) / BUCKETS);
+        const i1 = Math.max(i0 + 1, Math.floor((b + 1) * (path.length - 1) / BUCKETS));
+        ctx.strokeStyle = baseColor;
+        ctx.globalAlpha = (isTips ? 0.08 : 0.12) + (isTips ? 0.30 : 0.62) * (b + 1) / BUCKETS;
+        ctx.lineWidth = isTips ? 1 : 1.4;
+        ctx.beginPath();
+        let started = false;
+        for (let i = i0; i <= Math.min(i1, path.length - 1); i++) {
+          const q = proj(path[i]);
+          if (!q) { started = false; continue; }
+          if (!started) { ctx.moveTo(q[0], q[1]); started = true; } else ctx.lineTo(q[0], q[1]);
+        }
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      // current-frame marker at the newest end of the clipped path
+      const q = proj(path[path.length - 1]);
+      if (q) {
+        ctx.fillStyle = baseColor;
+        ctx.beginPath(); ctx.arc(q[0], q[1], isTips ? 2.4 : 4, 0, Math.PI * 2); ctx.fill();
+        if (!isTips) {
+          ctx.strokeStyle = "#e6edf3"; ctx.lineWidth = 1.2;
+          ctx.beginPath(); ctx.arc(q[0], q[1], 6, 0, Math.PI * 2); ctx.stroke();
+        }
+      }
+    }
+  }
+
+  // depth-sorted hands and triads
+  const drawables = [];
+  for (const pr of prims) {
+    if (pr.hand) drawables.push({ d: Math.min(...pr.hand.nodes.map(depthOf)), hand: pr.hand });
+  }
+  for (const [name, cp] of Object.entries(curPose)) {
+    drawables.push({ d: depthOf(cp.pos), triad: { name, ...cp } });
+  }
+  drawables.sort((a, b) => b.d - a.d);   // far first
+
+  for (const it of drawables) {
+    if (it.hand) {
+      const { nodes, color } = it.hand;
+      // bones: root -> chain heads + within-chain links
+      ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.lineCap = "round";
+      for (const chain of HAND_CHAINS) {
+        let prev = nodes[0];
+        for (const ni of chain) {
+          const a = proj(prev), b = proj(nodes[ni]);
+          if (a && b) { ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke(); }
+          prev = nodes[ni];
+        }
+      }
+      // joints: root big, fingertips bigger
+      nodes.forEach((p, i) => {
+        const q = proj(p);
+        if (!q) return;
+        const tip = HAND_CHAINS.some(c => c[c.length - 1] === i);
+        const r = i === 0 ? 4.5 : tip ? 3.5 : 2.2;
+        ctx.fillStyle = color;
+        ctx.beginPath(); ctx.arc(q[0], q[1], r, 0, Math.PI * 2); ctx.fill();
+      });
+    } else if (it.triad) {
+      const { pos, rot, name } = it.triad;
+      const L = 0.09;
+      const axes = [[[1, 0, 0], "#f85149", "x"], [[0, 1, 0], "#3fb950", "y"], [[0, 0, 1], "#58a6ff", "z"]];
+      const base = proj(pos);
+      if (!base) continue;
+      for (const [a, col, lab] of axes) {
+        const dir = mulMatVec(rot, a);
+        const tip = proj([pos[0] + dir[0] * L, pos[1] + dir[1] * L, pos[2] + dir[2] * L]);
+        if (tip) {
+          ctx.strokeStyle = col; ctx.lineWidth = 2.5; ctx.lineCap = "round";
+          ctx.beginPath(); ctx.moveTo(base[0], base[1]); ctx.lineTo(tip[0], tip[1]); ctx.stroke();
+          ctx.fillStyle = col; ctx.font = "bold 10px monospace";
+          ctx.fillText(lab, tip[0] + 2, tip[1] + 3);
+        }
+      }
+      ctx.fillStyle = poseColor(name);
+      ctx.beginPath(); ctx.arc(base[0], base[1], 4, 0, Math.PI * 2); ctx.fill();
+      ctx.font = "bold 11px monospace";
+      ctx.fillText(name, base[0] + 7, base[1] - 7);
+    }
+  }
 }
 
 // ── tooltip ─────────────────────────────────────────────────────────────

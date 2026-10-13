@@ -291,6 +291,8 @@ python -m examples.06audio_example
 
 网页可视化支持对 EEG/EMG 条带做零相位滤波：在条带上打开"滤波"面板，可组合高通/低通 Butterworth 滤波与工频及其全部谐波的梳状陷波（内置 EEG/EMG 预设）。API 同样支持按 feature 传参：`/api/frame?...&filt=observation.eeg:hp=0.5,lp=40,notch=50`。
 
+还内置 3D 姿态视图（SteamVR 右手系、Y 朝上：`*_pose` 6D 位姿画为坐标三角轴 + 近期运动拖尾（随时间渐亮）、`hand_skeleton` 正运动学得到指尖末端轨迹，可拖动旋转/滚轮缩放），以及静态快照字段的电极着色网格（如 `eeg_impedance` 按阻抗质量分档着色）。位姿旋转严格按采集端公式还原（`R = Rz(yaw)·Ry(pitch)·Rx(roll)`，即采集端对 OpenVR 矩阵做 ZYX 欧拉分解的逆）；手骨架经每手恒定的 Manus→tracker 安装映射挂接（tracker 约定 +z=手指、+y=手背，并沿 −y 偏移 5cm——tracker 实际安装在手背上方）。
+
 ### 4.2 Demo 1：写入（01write_simple.py）
 
 主写 demo：一个完整的模拟机器人 —— 3 路相机 + IMU + EEG + EMG + temperature，录制三个 2 秒 episode（`reach_target`、`pour_liquid`、`stack_blocks`）：

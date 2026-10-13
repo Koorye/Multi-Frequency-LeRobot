@@ -14,6 +14,7 @@ API::
     GET /api/frame?ep=&f=&w0=&w1=&cols=&filt=  windowed samples at frame f
     GET /api/video?ep=&f=&cam=&scale=&q= JPEG of one camera frame
     GET /api/stats?ep=                   per-feature min/max/mean/std (bands)
+    GET /api/track?ep=                   whole-episode 3D pose/fingertip paths
 
 ``filt`` (optional, per feature) applies zero-phase filtering to a signal
 before windowing, e.g. ``filt=observation.eeg:hp=0.5,lp=40,notch=50`` —
@@ -199,6 +200,47 @@ def bandpass_filter(fts: np.ndarray, vals: np.ndarray, filt: dict,
     return fts, out
 
 
+def _euler_lh(roll: float, pitch: float, yaw: float) -> np.ndarray:
+    """(roll, pitch, yaw) -> rotation, exactly as saved by the recorder: the
+    pose comes from OpenVR mDeviceToAbsoluteTracking (SteamVR right-handed
+    y-up world) and euler_rpy_deg is its standard ZYX decomposition:
+    R = Rz(yaw)·Ry(pitch)·Rx(roll), right-handed positive angles."""
+    r, p, y = (math.radians(a) for a in (roll, pitch, yaw))
+    cr, sr, cp, sp, cy, sy = math.cos(r), math.sin(r), math.cos(p), math.sin(p), math.cos(y), math.sin(y)
+    Rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
+    Ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
+    Rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
+    return Rz @ Ry @ Rx
+
+
+HAND_TIP_NODES = (4, 9, 14, 19, 24)   # fingertip node of each finger chain
+
+# Manus-skeleton → wrist-tracker mount (user-verified): tracker convention
+# +z = finger, +y = back of the hand; base maps the measured data axes onto
+# it, then per-hand fixes — left hand spins 180° about z, both mirror
+# across yz. det = +1.
+_HAND_C_BASE = {
+    "left": np.array([[-0.2705, 0.9583, -0.0925],
+                      [0.0951, -0.069, -0.9931],
+                      [0.958, 0.2774, 0.0725]]),
+    "right": np.array([[-0.2723, -0.9589, -0.0796],
+                       [-0.0949, -0.0556, 0.9939],
+                       [0.9575, -0.2782, 0.0758]]),
+}
+HAND_FIX = {
+    "left": np.diag([1.0, -1.0, 1.0]),
+    "right": np.diag([-1.0, 1.0, 1.0]),
+}
+HAND_C = {s: HAND_FIX[s] @ m for s, m in _HAND_C_BASE.items()}
+# the tracker sits ~5cm above the midpoint between the palm root and the
+# middle-finger MCP: world = R_pose·(C·local + OFFSET) + wrist, with
+# OFFSET = (0,-0.05,0) − C·p_ref  (p_ref = that midpoint in data coords)
+HAND_OFFSET = {
+    "left": np.array([0.0059, -0.0519, -0.048]),
+    "right": np.array([-0.0059, -0.0518, -0.048]),
+}
+
+
 class DatasetApp:
     """Read-only view over one MultiFrequencyLeRobotDataset + caches."""
 
@@ -210,6 +252,7 @@ class DatasetApp:
         self._video_cache: "OrderedDict[tuple, bytes]" = OrderedDict()
         self._filt_cache: "OrderedDict[tuple, tuple[np.ndarray, np.ndarray]]" = OrderedDict()
         self._filt_bytes = 0
+        self._track_cache: "OrderedDict[tuple, dict]" = OrderedDict()
         self._lock = threading.Lock()
 
     # ── Episode master tables ──
@@ -250,6 +293,43 @@ class DatasetApp:
             return self._filt_cache[ck]
 
     # ── Data queries ──
+
+    def _pose_features(self) -> dict:
+        """6-DoF pose features: shape [6] named x,y,z,roll,pitch,yaw."""
+        out = {}
+        for key, feat in self.ds._features.items():
+            spec = self.ds.meta.features.get(key, {})
+            names = spec.get("names")
+            if (isinstance(feat, VideoFeature) or spec.get("dtype") == "audio"):
+                continue
+            if list(spec.get("shape", ())) == [6] and names == ["x", "y", "z", "roll", "pitch", "yaw"]:
+                out[key] = feat
+        return out
+
+    def track_data(self, ep: int, max_points: int = 2000) -> dict:
+        """Whole-episode 3D tracks for the pose view (VIVE tracker paths
+        only), cached per episode."""
+        ck = ("track", ep)
+        with self._lock:
+            if ck in self._track_cache:
+                return self._track_cache[ck]
+
+        out = {}
+        for key, feat in self._pose_features().items():
+            fts, vals = feat.load(ep)
+            if not len(fts):
+                continue
+            k = max(1, int(np.ceil(len(fts) / max_points)))
+            out[key] = {
+                "ts": fts[::k].round(6).tolist(),
+                "xyz": vals[::k, :3].astype(np.float64).round(5).tolist(),
+            }
+
+        with self._lock:
+            self._track_cache[ck] = out
+            while len(self._track_cache) > 4:
+                self._track_cache.popitem(last=False)
+        return out
 
     def frame_data(self, ep: int, f: int, w0: float, w1: float,
                    cols: dict[str, list[int] | None],
@@ -374,8 +454,23 @@ class DatasetApp:
 
     # ── Metadata payloads ──
 
+    def _parquet_names(self, key: str) -> list[str] | None:
+        """Real value-column names of a feature's parquet (metadata-only read).
+        Writers store electrode names (e.g. eeg_impedance: Fp1, Fpz, ...) even
+        when meta.info carries none."""
+        try:
+            first_ep = min(self.ds.meta.episodes) if self.ds.meta.episodes else 0
+            path = self.root / (f"data/chunk-{first_ep // self.chunks_size:03d}/"
+                                f"episode_{first_ep:06d}/{key}.parquet")
+            cols = [c for c in pq.read_schema(path).names
+                    if c not in ("timestamp", "episode_index")]
+            return cols or None
+        except Exception:
+            return None
+
     def dataset_summary(self) -> dict:
         features = []
+        first_stats = next(iter(self.ds.meta.episodes_stats.values()), None)
         for key, ft in self.ds.meta.features.items():
             kind = "video" if ft.get("dtype") in ("video", "image") else "parquet"
             if key in ("timestamp", "frame_index", "episode_index", "index", "task_index"):
@@ -387,7 +482,15 @@ class DatasetApp:
                     # shape is (n_samples[, channels]) — channels are the value columns
                     names = [f"ch_{i}" for i in range(shape[1] if len(shape) > 1 else 1)]
                 else:
+                    names = self._parquet_names(key)
+                if names is None:
                     names = [f"dim_{i}" for i in range(shape[0])]
+            # static = whole-episode snapshot (single row): from stats count
+            static = False
+            if first_stats and key in first_stats:
+                cnt = first_stats[key].get("count")
+                if cnt is not None and int(np.ravel(cnt)[0]) == 1:
+                    static = True
             features.append({
                 "key": key,
                 "kind": kind,
@@ -395,6 +498,7 @@ class DatasetApp:
                 "names": names,
                 "window": list(ft["window"]) if ft.get("window") else None,
                 "fps": ft.get("fps") or ft.get("sample_rate"),
+                "static": static,
             })
         return {
             "name": self.ds.repo_id,
@@ -478,6 +582,8 @@ class Handler(BaseHTTPRequestHandler):
                            "image/jpeg")
             elif url.path == "/api/stats":
                 self._json(self.app.episode_stats(int(q["ep"][0])))
+            elif url.path == "/api/track":
+                self._json(self.app.track_data(int(q["ep"][0])))
             else:
                 self._json({"error": f"unknown path {url.path}"}, 404)
         except KeyError as e:

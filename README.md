@@ -291,6 +291,8 @@ python -m examples.06audio_example
 
 The web visualizer supports optional zero-phase filtering of EEG/EMG strips: open the 滤波 panel on a strip and combine a high-pass / low-pass Butterworth with a comb notch at the line frequency and all its harmonics (EEG/EMG presets included). The API takes the same spec per feature: `/api/frame?...&filt=observation.eeg:hp=0.5,lp=40,notch=50`.
 
+It also renders a 3D pose view in the SteamVR right-handed y-up world (`*_pose` 6-DoF features as coordinate triads + recent-history motion trails with time fading, fingertip end-effector paths from `hand_skeleton` FK; drag to rotate, wheel to zoom) and a color-coded electrode grid for static snapshot features such as `eeg_impedance` (quality-banded per channel). Pose rotation follows the recorder exactly (`R = Rz(yaw)·Ry(pitch)·Rx(roll)`, the inverse of the recorder's ZYX euler decomposition of the OpenVR matrix); hand skeletons attach via a constant per-hand Manus→tracker mount map (+z = finger, +y = back of hand, plus a −5cm offset along −y since the tracker sits above the back of the hand).
+
 ### 4.2 Demo 1: Writing (01write_simple.py)
 
 The main write demo: a full simulated robot — 3 cameras + IMU + EEG + EMG + temperature — recording three 2-second episodes (`reach_target`, `pour_liquid`, `stack_blocks`):
